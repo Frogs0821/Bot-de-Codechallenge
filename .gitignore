@@ -129,4 +129,4 @@ dmypy.json
 .pyre/
 
 # Local run helper (may embed a bot token)
-start.sh
+start_dev.sh
