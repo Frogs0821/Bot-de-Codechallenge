@@ -19,7 +19,7 @@ async def send(websocket, action, data):
 
 async def start(auth_token):
     # uri = "ws://codechallenge-server-stg-50693b4b7f64.herokuapp.com/ws?token={}".format(auth_token)
-    # uri = "ws://codechallenge-server-f4118f8ea054.herokuapp.com/ws?token={}".format(auth_token)
+    # uri = "wss://codechallenge-server.up.railway.app/ws?token={}".format(auth_token)
     uri = "ws://localhost:5000/ws?token={}".format(auth_token)
     while True:
         try:
