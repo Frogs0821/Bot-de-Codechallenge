@@ -130,3 +130,6 @@ dmypy.json
 
 # Local run helper (may embed a bot token)
 start_dev.sh
+
+# game logs written at the end of each match
+game_*.log

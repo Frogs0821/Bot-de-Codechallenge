@@ -6,6 +6,28 @@ import websockets
 import time
 
 
+# A running text log of events received / actions sent per game, written to
+# game_<game_id>.log when the match ends.
+HISTORY = {}
+
+
+def log_event(game_id, message):
+    HISTORY.setdefault(game_id, []).append('< ' + json.dumps(message))
+
+
+def log_action(game_id, message):
+    HISTORY.setdefault(game_id, []).append('> ' + json.dumps(message))
+
+
+def write_game_log(game_id):
+    try:
+        with open(f"game_{game_id}.log", "w") as f:
+            f.write("\n".join(HISTORY.get(game_id, [])) + "\n")
+        print(f"saved game_{game_id}.log")
+    except OSError as e:
+        print(f"could not write game log: {e}")
+
+
 async def send(websocket, action, data):
     message = json.dumps(
         {
@@ -42,8 +64,11 @@ async def play(websocket):
             request_data = json.loads(request)
             if request_data['event'] == 'update_user_list':
                 pass
-            if request_data['event'] == 'gameover':
-                pass
+            if request_data['event'] == 'game_over':
+                game_id = request_data['data'].get('game_id')
+                if game_id:
+                    log_event(game_id, request_data)
+                    write_game_log(game_id)
             if request_data['event'] == 'challenge':
                 # if request_data['data']['opponent'] == 'favoriteopponent':
                 await send(
@@ -54,6 +79,7 @@ async def play(websocket):
                     },
                 )
             if request_data['event'] == 'your_turn':
+                log_event(request_data['data']['game_id'], request_data)
                 await process_your_turn(websocket, request_data)
         except KeyboardInterrupt:
             print('Exiting...')
@@ -73,15 +99,13 @@ async def process_move(websocket, request_data):
     board = request_data['data']['board']
     colums = board.find('|', 1) - 1
     print(board)
-    await send(
-        websocket,
-        'move',
-        {
-            'game_id': request_data['data']['game_id'],
-            'turn_token': request_data['data']['turn_token'],
-            'col': randint(0, colums),
-        },
-    )
+    move = {
+        'game_id': request_data['data']['game_id'],
+        'turn_token': request_data['data']['turn_token'],
+        'col': randint(0, colums),
+    }
+    log_action(move['game_id'], {'action': 'move', 'data': move})
+    await send(websocket, 'move', move)
 
 
 async def process_wall(websocket, request_data):
