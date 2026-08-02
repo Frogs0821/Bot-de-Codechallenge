@@ -48,6 +48,20 @@ connects to the production server; switch the `uri` in `run.py` to the
 > `start.sh` / `start_dev.sh` are convenience runners kept out of git because
 > they may embed your personal token.
 
+## Game logs
+
+When a match ends, the client writes a **`game_<game_id>.log`** in the working
+directory with everything that happened: each event received (`<`) and action
+sent (`>`), as JSON, ending with the `game_over` event. Useful for replaying or
+debugging a match. These files are git-ignored.
+
+```
+< {"event": "your_turn", "data": {"board": "...", "game_id": "g_9f", "turn_token": "t_01", ...}}
+> {"action": "move", "data": {"game_id": "g_9f", "turn_token": "t_01", "col": 3}}
+...
+< {"event": "game_over", "data": {"board": "...", "game_id": "g_9f", ...}}
+```
+
 ## Write your own bot
 
 You don't need this client — any websocket client works. The contract is:
