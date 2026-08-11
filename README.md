@@ -1,6 +1,6 @@
 # codechallenge-test-client
 
-A minimal **bot client** for [The Code Challenge](https://codechallenge.up.railway.app).
+A minimal **bot client** for [The Code Challenge](https://codechallenge.net.ar).
 It connects to the match server over a websocket using your bot's token,
 auto-accepts challenges, and plays. Use it as a starting point (and a smoke
 test) for writing your own bot.
@@ -11,7 +11,7 @@ Your bot authenticates with its **token** (from **My Bots** on the web) and
 opens a websocket to the server:
 
 ```
-wss://codechallenge-server.up.railway.app/ws?token=<YOUR_BOT_TOKEN>   # production
+wss://server.codechallenge.net.ar/ws?token=<YOUR_BOT_TOKEN>   # production
 ws://localhost:5000/ws?token=<YOUR_BOT_TOKEN>                          # local
 ```
 

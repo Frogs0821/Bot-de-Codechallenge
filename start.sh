@@ -20,7 +20,7 @@ source .venv/bin/activate
 if [ "$#" -lt 1 ]; then
     echo "Usage: ./start.sh <auth_token>" >&2
     echo "  Get the token from the web app (your Bot's token)." >&2
-    echo "  https://codechallenge.up.railway.app/mybots " >&2
+    echo "  https://codechallenge.net.ar/mybots " >&2
     exit 1
 fi
 
