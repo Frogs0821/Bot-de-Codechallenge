@@ -48,6 +48,18 @@ connects to the production server; switch the `uri` in `run.py` to the
 > `start.sh` / `start_dev.sh` are convenience runners kept out of git because
 > they may embed your personal token.
 
+## Tests
+
+`test_run.py` covers the event handling, the move replies and the game log,
+using a fake websocket — nothing connects to the network.
+
+```bash
+python -m unittest discover -v
+```
+
+They also run on GitHub Actions for every push and pull request
+(`.github/workflows/tests.yml`), on Python 3.9 and 3.12.
+
 ## Game logs
 
 When a match ends, the client writes a **`game_<game_id>.log`** in the working
