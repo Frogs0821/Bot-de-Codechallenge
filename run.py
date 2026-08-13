@@ -95,16 +95,109 @@ async def process_your_turn(websocket, request_data):
 
 
 async def process_move(websocket, request_data):
-    side = request_data['data']['side']
-    board = request_data['data']['board']
-    colums = board.find('|', 1) - 1
-    print(board)
-    move = {
-        'game_id': request_data['data']['game_id'],
-        'turn_token': request_data['data']['turn_token'],
-        'col': randint(0, colums),
+    data = request_data['data']
+
+    game_id = data['game_id']
+    turn_token = data['turn_token']
+    board = data['board']
+    side = data['side']
+
+    # Convertimos el tablero en una matriz
+    rows = [
+        row.strip('|')
+        for row in board.splitlines()
+        if row.strip('|')
+    ]
+
+    height = len(rows)
+    width = len(rows[0])
+
+    # Buscamos nuestra cabeza, la comida y los obstáculos
+    head = None
+    food = []
+
+    obstacles = set()
+
+    for r, row in enumerate(rows):
+        for c, cell in enumerate(row):
+            if cell == side:
+                head = (r, c)
+            elif cell == '*':
+                food.append((r, c))
+            elif cell != ' ':
+                # Cualquier parte de una serpiente es un obstáculo
+                obstacles.add((r, c))
+
+    if head is None:
+        print("No encontré la cabeza de la serpiente.")
+        return
+
+    print(f"Snake {side}: cabeza={head}")
+    print(f"Comida: {food}")
+
+    # Elegimos la comida más cercana
+    target = min(
+        food,
+        key=lambda pos: abs(pos[0] - head[0]) + abs(pos[1] - head[1])
+    ) if food else None
+
+    # Posibles movimientos
+    directions = {
+        'up': (-1, 0),
+        'down': (1, 0),
+        'left': (0, -1),
+        'right': (0, 1),
     }
-    log_action(move['game_id'], {'action': 'move', 'data': move})
+
+    # Movimientos seguros
+    safe_moves = []
+
+    for direction, (dr, dc) in directions.items():
+        nr = head[0] + dr
+        nc = head[1] + dc
+
+        # No salir del tablero
+        if nr < 0 or nr >= height or nc < 0 or nc >= width:
+            continue
+
+        # No chocar contra otra parte de una serpiente
+        if (nr, nc) in obstacles:
+            continue
+
+        safe_moves.append((direction, nr, nc))
+
+    if not safe_moves:
+        print("¡No hay movimientos seguros!")
+        return
+
+    # Si hay comida, elegimos el movimiento que más nos acerque.
+    if target:
+        direction, _, _ = min(
+            safe_moves,
+            key=lambda move:
+                abs(move[1] - target[0]) +
+                abs(move[2] - target[1])
+        )
+    else:
+        # Si no encontramos comida, simplemente usamos el primer movimiento seguro.
+        direction = safe_moves[0][0]
+
+    move = {
+        'game_id': game_id,
+        'turn_token': turn_token,
+        'direction': direction,
+    }
+
+    print(f"Movimiento elegido: {direction}")
+
+    log_action(
+        game_id,
+        {
+            'action': 'move',
+            'data': move
+        }
+    )
+
     await send(websocket, 'move', move)
 
 
@@ -125,6 +218,6 @@ async def process_wall(websocket, request_data):
 if __name__ == '__main__':
     if len(sys.argv) >= 2:
         auth_token = sys.argv[1]
-        asyncio.get_event_loop().run_until_complete(start(auth_token))
+        asyncio.run(start(auth_token))
     else:
         print('please provide your auth_token')
