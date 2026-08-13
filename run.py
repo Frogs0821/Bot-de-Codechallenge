@@ -93,6 +93,25 @@ async def process_your_turn(websocket, request_data):
     # if randint(0, 4) >= 1:
     await process_move(websocket, request_data)
 
+def print_board(board, side, direction=None, score=None, remaining_moves=None):
+    print("\033[2J\033[H", end="")
+
+    print("=" * 40)
+    print("           🐍 Snake Bot")
+    print("=" * 40)
+
+    if score is not None:
+        print(f"Puntos: {score}")
+
+    if remaining_moves is not None:
+        print(f"Movimientos restantes: {remaining_moves}")
+
+    if direction:
+        print(f"Dirección: {direction}")
+
+    print()
+    print(board)
+    print()
 
 async def process_move(websocket, request_data):
     data = request_data['data']
@@ -102,6 +121,13 @@ async def process_move(websocket, request_data):
     board = data['board']
     side = data['side']
 
+    print_board(
+    board,
+    side,
+    data.get('direction'),
+    data.get('score_1') if side == 'A' else data.get('score_2'),
+    data.get('remaining_moves')
+    )
     # Convertimos el tablero en una matriz
     rows = [
         row.strip('|')
