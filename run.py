@@ -27,6 +27,66 @@ def write_game_log(game_id):
     except OSError as e:
         print(f"could not write game log: {e}")
 
+def clear_terminal():
+    """Limpia la terminal"""
+    print("\033[2J\033[H", end="")
+
+
+def draw_game(board, side, direction=None, score=None, remaining_moves=None):
+    """Dibuja el estado actual de Snake en la terminal"""
+
+    clear_terminal()
+
+    print("╔══════════════════════════════════════╗")
+    print("║              🐍 SNAKE BOT            ║")
+    print("╠══════════════════════════════════════╣")
+
+    if score is not None:
+        print(f"║  Puntos: {score:<28}║")
+
+    if remaining_moves is not None:
+        print(f"║  Movimientos restantes: {remaining_moves:<14}║")
+
+    if direction:
+        print(f"║  Dirección: {direction:<25}║")
+
+    print("╠══════════════════════════════════════╣")
+
+    # El tablero se dibuja con emojis para representar las serpientes y la comida
+    for row in board.splitlines():
+        row = row.strip()
+
+        if not row:
+            continue
+
+        visual_row = ""
+
+        for cell in row:
+            if cell == "A":
+                visual_row += "🟢"
+            elif cell == "a":
+                visual_row += "🟩"
+            elif cell == "B":
+                visual_row += "🔴"
+            elif cell == "b":
+                visual_row += "🟥"
+            elif cell == "*":
+                visual_row += "🍎"
+            elif cell == "|":
+                visual_row += "│"
+            else:
+                visual_row += "  "
+
+        print(f"║ {visual_row:<34}║")
+
+    print("╠══════════════════════════════════════╣")
+    print("║  🟢 Mi serpiente   🔴 Rival          ║")
+    print("║  🍎 Comida                            ║")
+    print("╚══════════════════════════════════════╝")
+
+    if direction:
+        print()
+        print(f"  ➜ El bot eligió: {direction}")
 
 async def send(websocket, action, data):
     message = json.dumps(
@@ -128,7 +188,7 @@ async def process_move(websocket, request_data):
     data.get('score_1') if side == 'A' else data.get('score_2'),
     data.get('remaining_moves')
     )
-    # Convertimos el tablero en una matriz
+    # Tablero a matriz
     rows = [
         row.strip('|')
         for row in board.splitlines()
@@ -138,7 +198,7 @@ async def process_move(websocket, request_data):
     height = len(rows)
     width = len(rows[0])
 
-    # Buscamos nuestra cabeza, la comida y los obstáculos
+    # Busca la cabeza, la comida y los obstáculos
     head = None
     food = []
 
@@ -161,7 +221,7 @@ async def process_move(websocket, request_data):
     print(f"Snake {side}: cabeza={head}")
     print(f"Comida: {food}")
 
-    # Elegimos la comida más cercana
+    # Elegir la comida más cercana
     target = min(
         food,
         key=lambda pos: abs(pos[0] - head[0]) + abs(pos[1] - head[1])
@@ -196,7 +256,7 @@ async def process_move(websocket, request_data):
         print("¡No hay movimientos seguros!")
         return
 
-    # Si hay comida, elegimos el movimiento que más nos acerque.
+    # Si hay comida, eligo el movimiento cercano
     if target:
         direction, _, _ = min(
             safe_moves,
@@ -205,7 +265,7 @@ async def process_move(websocket, request_data):
                 abs(move[2] - target[1])
         )
     else:
-        # Si no encontramos comida, simplemente usamos el primer movimiento seguro.
+        # Si no eencuentran comida, uso el primer movimiento seguro
         direction = safe_moves[0][0]
 
     move = {
