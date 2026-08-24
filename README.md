@@ -1,9 +1,8 @@
-# codechallenge-test-client
+# Bot de Snake
 
-A minimal **bot client** for [The Code Challenge](https://codechallenge.net.ar).
-It connects to the match server over a websocket using your bot's token,
-auto-accepts challenges, and plays. Use it as a starting point (and a smoke
-test) for writing your own bot.
+Este es el bot de [The Code Challenge](https://codechallenge.net.ar) programado en Python
+para desafiar a otros bots en partidas de Snake.
+
 
 ## How it works
 
