@@ -10,6 +10,7 @@ from collections import deque
 # game_<game_id>.log when the match ends.
 HISTORY = {}
 LAST_DIRECTION = {}
+LAST_TARGET = {}
 
 DIRECTIONS = {
     "up": (-1, 0),
@@ -122,6 +123,7 @@ def draw_game(board, side, direction=None, score=None, remaining_moves=None):
         print()
         print(f"  ➜ El bot eligió: {direction}")
 
+
 async def send(websocket, action, data):
     message = json.dumps(
         {
@@ -135,7 +137,6 @@ async def send(websocket, action, data):
 
 async def start(auth_token):
     uri = "wss://server.codechallenge.net.ar/ws?token={}".format(auth_token)
-    # uri = "ws://localhost:5000/ws?token={}".format(auth_token)
     while True:
         try:
             print('connection to {}'.format(uri))
@@ -145,8 +146,8 @@ async def start(auth_token):
         except KeyboardInterrupt:
             print('Exiting...')
             break
-        except Exception:
-            print('connection error!')
+        except Exception as e:
+            print(f'connection error! ({type(e).__name__}: {e})')
             time.sleep(3)
 
 
@@ -154,10 +155,8 @@ async def play(websocket):
     while True:
         try:
             request = await websocket.recv()
-            print(f"< {request}")
             request_data = json.loads(request)
-            if request_data['event'] == 'update_user_list':
-                pass
+            print(f"< evento: {request_data.get('event')}")
             if request_data['event'] == 'game_over':
                 game_id = request_data['data'].get('game_id')
                 if game_id:
@@ -178,9 +177,17 @@ async def play(websocket):
         except KeyboardInterrupt:
             print('Exiting...')
             break
-        except Exception as e:
-            print('error {}'.format(str(e)))
+        except (
+            websockets.exceptions.ConnectionClosed,
+            websockets.exceptions.WebSocketException,
+        ):
+            print('conexión perdida, reconectando...')
             break  # force login again
+        except Exception:
+            import traceback
+            print('error procesando evento (se ignora, seguimos escuchando):')
+            traceback.print_exc()
+            continue
 
 
 async def process_your_turn(websocket, request_data):
@@ -216,7 +223,7 @@ def parse_board(board):
         if not line:
             continue
 
-        # Quitamos solamente los bordes |
+        # Quita solamente los bordes |
         if line.startswith("|"):
             line = line[1:]
 
@@ -273,7 +280,7 @@ def find_snakes(rows, side):
             elif cell in "abAB":
                 obstacles.add((r, c))
 
-    # La cabeza propia es nuestro punto de partida,
+    # La cabeza propia es el punto de partida,
     # así que no debe considerarse un obstáculo.
     if own_head in obstacles:
         obstacles.remove(own_head)
@@ -375,13 +382,20 @@ def food_score(
     position,
     food,
     blocked,
-    enemy_head
+    enemy_head,
+    preferred_target=None,
+    total_foods=1
 ):
     """
     Puntúa una comida teniendo en cuenta:
     - distancia propia
     - distancia del rival
-    - si podemos llegar antes
+    - si llega antes
+    - si es la comida a la que ya veníamos apuntando (para no
+      dudar entre dos objetivos parecidos turno a turno)
+    - cuánta comida hay en total en el mapa: si hay poca,
+      vale la pena viajar lejos; si hay
+      mucha, conviene ser selectivo e ir a lo rápido/seguro.
     """
 
     own_path = bfs_path(
@@ -418,21 +432,38 @@ def food_score(
 
     score = 1000
 
-    # Quiere comidas cercanas.
-    score -= own_distance * 25
+    # Con poca comida en el mapa 
+    # (1-2), conviene ir por la que haya aunque esté lejos
+    # no hay de otra. Con comida abundante mejor prioriza
+    # lo cercano y deja pasar lo lejano, porque
+    # seguramente aparezca algo mejor más cerca pronto.
+    if total_foods <= 2:
+        distance_weight = 15
+    elif total_foods >= 5:
+        distance_weight = 40
+    else:
+        distance_weight = 25
+
+    score -= own_distance * distance_weight
 
     # Quiere llegar antes que el rival.
     race_difference = enemy_distance - own_distance
 
     score += race_difference * 35
 
-    # Si el rival llega antes, lo penaliza bastante.
+    # Si el rival llega antes, lo penaliza — pero mucho menos
+    # si esta es la única comida disponible.
     if enemy_distance <= own_distance:
-        score -= 300
+        score -= 100 if total_foods <= 2 else 300
 
-    # Si llegamos claramente antes, premiamos.
+    # Si llega claramente antes, premiamos.
     elif enemy_distance >= own_distance + 3:
         score += 250
+
+    # Evita zigzaguear cambiando de objetivo cada turno
+    # entre dos comidas de puntaje parecido.
+    if preferred_target is not None and food == preferred_target:
+        score += 120
 
     return score
 
@@ -442,12 +473,15 @@ def choose_target(
     head,
     foods,
     blocked,
-    enemy_head
+    enemy_head,
+    preferred_target=None
 ):
     """Elige la comida más conveniente."""
 
     best_food = None
     best_score = float("-inf")
+
+    total_foods = len(foods)
 
     for food in foods:
 
@@ -456,17 +490,61 @@ def choose_target(
             head,
             food,
             blocked,
-            enemy_head
+            enemy_head,
+            preferred_target,
+            total_foods
         )
 
         if score is None:
             continue
 
-        if score > best_score:
+        if score > best_score or (
+            score == best_score and food == preferred_target
+        ):
             best_score = score
             best_food = food
 
     return best_food
+
+
+def simulate_survival(rows, start_head, blocked, depth):
+    """
+    Simula varios movimientos propios hacia adelante para detectar
+    si un camino que HOY parece amplio termina cerrándose (un
+    "cuello de botella" que recién se nota unos turnos más tarde).
+
+    """
+
+    current_blocked = set(blocked)
+    current_head = start_head
+    steps = 0
+
+    for _ in range(depth):
+
+        candidates = legal_moves(rows, current_head, current_blocked)
+
+        if not candidates:
+            break
+
+        best_next = None
+        best_area = -1
+
+        for _, nxt in candidates:
+
+            trial_blocked = current_blocked | {current_head}
+            area = reachable_area(rows, nxt, trial_blocked)
+
+            if area > best_area:
+                best_area = area
+                best_next = nxt
+
+        current_blocked.add(current_head)
+        current_head = best_next
+        steps += 1
+
+    final_area = reachable_area(rows, current_head, current_blocked)
+
+    return steps, final_area
 
 
 def choose_direction(
@@ -475,11 +553,18 @@ def choose_direction(
     enemy_head,
     foods,
     blocked,
-    current_direction
+    current_direction,
+    preferred_target=None
 ):
     """
     Decide el próximo movimiento.
     Combina comida + seguridad + espacio disponible.
+
+    Devuelve (direccion, target_elegido). target_elegido es la
+    comida hacia la que apunta esa decisión (o None si no hay
+    ninguna alcanzable) — se guarda para pasarla como
+    preferred_target la próxima vez y así no dudar entre dos
+    objetivos parecidos turno a turno.
     """
 
     moves = legal_moves(
@@ -489,7 +574,35 @@ def choose_direction(
     )
 
     if not moves:
-        return None
+
+        # Callejón sin salida real: no hay ningún movimiento
+        # que no choque contra algo. Hay que mandar
+        # ALGO porque quedarse sin responder cuesta un timeout
+        # que es peor que perder jugando.
+        fallback_direction = None
+        fallback_area = -1
+
+        for direction, (dr, dc) in DIRECTIONS.items():
+
+            new_head = (head[0] + dr, head[1] + dc)
+
+            if not inside_board(rows, *new_head):
+                continue
+
+            if current_direction in OPPOSITE and direction == OPPOSITE[current_direction]:
+                continue
+
+            area = reachable_area(rows, new_head, set(blocked) | {head})
+
+            if area > fallback_area:
+                fallback_area = area
+                fallback_direction = direction
+
+        if fallback_direction is not None:
+            print("⚠️ Sin salida segura, jugando la menos mala:", fallback_direction)
+            return fallback_direction, None
+
+        return None, None
 
     # Evita invertir inmediatamente la dirección.
     if current_direction in OPPOSITE:
@@ -506,6 +619,7 @@ def choose_direction(
             moves = non_reverse
 
     best_direction = None
+    best_target = None
     best_score = float("-inf")
 
     for direction, new_head in moves:
@@ -533,7 +647,7 @@ def choose_direction(
         # Mucho espacio = muy bueno.
         score = area * 8
 
-        # Tener varias salidas también es bueno.
+        # Tener varias salidas es bueno.
         mobility = len(
             legal_moves(
                 rows,
@@ -543,6 +657,32 @@ def choose_direction(
         )
 
         score += mobility * 30
+
+        # ------------------------------------------------
+        # 2.b Mira varios turnos hacia adelante: ¿este
+        #     camino se termina cerrando solo, aunque
+        #     ahora mismo parezca amplio?
+        # ------------------------------------------------
+
+        LOOKAHEAD_DEPTH = 6
+
+        steps_survived, future_area = simulate_survival(
+            rows,
+            new_head,
+            simulated_blocked,
+            LOOKAHEAD_DEPTH
+        )
+
+        # Si sobrevive todo el horizonte simulado, no detectamos
+        # ninguna trampa cercana: apenas un desempate MENOR según
+        # cuánto espacio le queda a futuro.
+        if steps_survived >= LOOKAHEAD_DEPTH:
+            score += future_area * 0.3
+
+        else:
+            # Quedó sin movimientos DENTRO del horizonte simulado:
+            # esto es una señal fuerte de encierro. 
+            score -= (LOOKAHEAD_DEPTH - steps_survived) * 500
 
         # ------------------------------------------------
         # 3. Evita acercarse demasiado al rival.
@@ -570,8 +710,11 @@ def choose_direction(
             new_head,
             foods,
             simulated_blocked,
-            enemy_head
+            enemy_head,
+            preferred_target
         )
+
+        eats_now = False
 
         if target is not None:
 
@@ -593,6 +736,12 @@ def choose_direction(
                 # si puede conseguir otra.
                 score -= distance * 25
 
+                # Comer la manzana YA (distancia 0) es
+                # muchísimo mejor que acercarse
+                if distance == 0:
+                    eats_now = True
+                    score += 600
+
         # ------------------------------------------------
         # 5. Penalización fuerte por quedar encerrados.
         # ------------------------------------------------
@@ -604,8 +753,8 @@ def choose_direction(
             score -= 400
 
         # ------------------------------------------------
-        # 6. Pequeña preferencia por no ir contra bordes
-        # si tiene alternativa.
+        # 6. Preferencia parano ir contra los bordes
+        # si se puede.
         # ------------------------------------------------
 
         r, c = new_head
@@ -619,11 +768,13 @@ def choose_direction(
             width - 1 - c
         )
 
-        if distance_to_wall == 0:
-            score -= 80
+        if not eats_now:
 
-        elif distance_to_wall == 1:
-            score -= 25
+            if distance_to_wall == 0:
+                score -= 80
+
+            elif distance_to_wall == 1:
+                score -= 25
 
         print(
             f"  {direction:>5} -> "
@@ -635,8 +786,9 @@ def choose_direction(
         if score > best_score:
             best_score = score
             best_direction = direction
+            best_target = target
 
-    return best_direction
+    return best_direction, best_target
 
 async def process_move(websocket, request_data):
 
@@ -665,30 +817,28 @@ async def process_move(websocket, request_data):
         or LAST_DIRECTION.get(game_id)
     )
 
-    print()
-    print("=" * 50)
-    print(f"🐍 SNAKE BOT | Tú: {side}")
-    print("=" * 50)
+    draw_game(
+        board,
+        side,
+        direction=current_direction,
+        score=data.get("score"),
+        remaining_moves=data.get("remaining_moves"),
+    )
 
-    print(f"Cabeza: {head}")
-    print(f"Rival:  {enemy_head}")
-    print(f"Comidas: {len(foods)}")
-    print(f"Dirección anterior: {current_direction}")
-
-    direction = choose_direction(
+    direction, target = choose_direction(
         rows,
         head,
         enemy_head,
         foods,
         blocked,
-        current_direction
+        current_direction,
+        preferred_target=LAST_TARGET.get(game_id)
     )
 
     if direction is None:
         print("⚠️ No encontré un movimiento seguro.")
         return
 
-    print()
     print(f"🧠 DECISIÓN: {direction.upper()}")
 
     move = {
@@ -698,81 +848,7 @@ async def process_move(websocket, request_data):
     }
 
     LAST_DIRECTION[game_id] = direction
-
-    log_action(
-        game_id,
-        {
-            "action": "move",
-            "data": move
-        }
-    )
-
-    await send(
-        websocket,
-        "move",
-        move
-    )
-    
-async def process_move(websocket, request_data):
-
-    data = request_data["data"]
-
-    game_id = data["game_id"]
-    turn_token = data["turn_token"]
-    board = data["board"]
-    side = data["side"]
-
-    rows = parse_board(board)
-
-    (
-        head,
-        enemy_head,
-        foods,
-        blocked
-    ) = find_snakes(rows, side)
-
-    if head is None:
-        print("ERROR: no pude encontrar nuestra cabeza.")
-        return
-
-    current_direction = (
-        data.get("direction")
-        or LAST_DIRECTION.get(game_id)
-    )
-
-    print()
-    print("=" * 50)
-    print(f"🐍 SNAKE BOT | Tú: {side}")
-    print("=" * 50)
-
-    print(f"Cabeza: {head}")
-    print(f"Rival:  {enemy_head}")
-    print(f"Comidas: {len(foods)}")
-    print(f"Dirección anterior: {current_direction}")
-
-    direction = choose_direction(
-        rows,
-        head,
-        enemy_head,
-        foods,
-        blocked,
-        current_direction
-    )
-
-    if direction is None:
-        print("⚠️ No encontré un movimiento seguro.")
-        return
-
-    print()
-    print(f"🧠 DECISIÓN: {direction.upper()}")
-
-    move = {
-        "game_id": game_id,
-        "turn_token": turn_token,
-        "direction": direction,
-    }
-
-    LAST_DIRECTION[game_id] = direction
+    LAST_TARGET[game_id] = target
 
     log_action(
         game_id,
