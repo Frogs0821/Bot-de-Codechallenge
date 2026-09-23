@@ -32,7 +32,7 @@ def clear_terminal():
     print("\033[2J\033[H", end="")
 
 
-def draw_game(board, side, direction=None, score=None, remaining_moves=None, expected_digit=None):
+def draw_game(board, side, direction=None, score=None, remaining_moves=None, expected_digit=None, multiplier=None):
     """Dibuja el estado actual de Snake."""
 
     clear_terminal()
@@ -58,6 +58,9 @@ def draw_game(board, side, direction=None, score=None, remaining_moves=None, exp
 
     if expected_digit is not None:
         print(f"║  🎯 Próximo dígito: {expected_digit:<19}║")
+
+    if multiplier is not None:
+        print(f"║  ✖️  Multiplicador: x{multiplier:<18}║")
 
     print("╠══════════════════════════════════════════╣")
 
@@ -93,6 +96,10 @@ def draw_game(board, side, direction=None, score=None, remaining_moves=None, exp
             elif cell == "*":
                 visual_row += "🍎"
 
+            # v4: bonus de multiplicador (seguro de pisar)
+            elif cell in ("X", "x"):
+                visual_row += "✖️"
+
             # v3: dígitos — el correcto es el objetivo, el resto
             # hay que evitarlos (cuestan -500 si se comen mal).
             elif cell.isdigit():
@@ -100,7 +107,9 @@ def draw_game(board, side, direction=None, score=None, remaining_moves=None, exp
                     visual_row += "🎯"
                 else:
                     visual_row += "⚠️"
-
+            # v5: muro móvil
+            elif cell == "#":
+                visual_row += "🧱"
             # Bordes
             elif cell == "|":
                 visual_row += "│"
@@ -115,6 +124,7 @@ def draw_game(board, side, direction=None, score=None, remaining_moves=None, exp
     print("║  🟢 Cabeza   🟩 Cuerpo                  ║")
     print("║  🔴 Rival    🟥 Cuerpo rival   🍎 Comida ║")
     print("║  🎯 Dígito correcto   ⚠️  Dígito a evitar ║")
+    print("║  ✖️  Bonus X (sube el multiplicador)     ║")
     print("╚══════════════════════════════════════════╝")
     if direction:
         print()
@@ -227,12 +237,21 @@ async def process_move(websocket, request_data):
         enemy_head,
         foods,
         blocked,
-        digits
+        digits,
+        bonuses
     ) = rules.find_snakes(rows, side)
 
     if head is None:
         print("ERROR: no pude encontrar nuestra cabeza.")
         return
+
+    # v4: el multiplicador es el único dato que NO se puede leer
+    # del tablero. El lado A es el player_1 y el B el player_2.
+    remaining_moves = data.get("remaining_moves")
+
+    multiplier = data.get(
+        "multiplier_1" if side == "A" else "multiplier_2"
+    ) or 1
 
     # v3: de todos los dígitos en el tablero, sólo uno es "comida"
     # de verdad ahora mismo (el que sigue en el orden ascendente
@@ -256,8 +275,9 @@ async def process_move(websocket, request_data):
         side,
         direction=current_direction,
         score=data.get("score"),
-        remaining_moves=data.get("remaining_moves"),
+        remaining_moves=remaining_moves,
         expected_digit=expected_digit,
+        multiplier=multiplier,
     )
 
     direction, target = rules.choose_direction(
@@ -268,7 +288,10 @@ async def process_move(websocket, request_data):
         blocked,
         current_direction,
         preferred_target=rules.LAST_TARGET.get(game_id),
-        danger_cells=danger_cells
+        danger_cells=danger_cells,
+        bonus_cells=bonuses,
+        remaining_moves=remaining_moves,
+        multiplier=multiplier
     )
 
     if direction is None:

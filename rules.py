@@ -35,6 +35,60 @@ LAST_TARGET = {}
 # avanzando cada vez que nosotros mismos comemos el correcto.
 EXPECTED_DIGIT = {}
 
+# ---------------------------------------------------------------
+# v4 (16 sep 2026): el tablero suma dos 'X'.
+#
+# Comer una X da +50 y sube el multiplicador un escalón (x2, x3,
+# ...), de forma PERMANENTE y sin resetearse. El multiplicador
+# escala solo los puntos de comida (digito x 100 x multiplicador);
+# no escala los +50 de la X, el +1 por movimiento ni las
+# penalizaciones de -500. La X no hace crecer la víbora y cada
+# jugador tiene su propio multiplicador.
+#
+# Cuánto vale subir un escalón:
+#   cada comida futura rinde `digito x 100` puntos EXTRA por cada
+#   escalón. Es decir, el valor de la X depende de cuántas comidas
+#   nos queden por comer (más turnos restantes = más valiosa) y
+#   NO del multiplicador actual en términos absolutos... pero sí
+#   en términos RELATIVOS: con un multiplicador alto, cada comida
+#   ya vale mucho, así que conviene priorizar comida antes que ir
+#   a buscar otra X. Por eso dividimos por el multiplicador.
+# ---------------------------------------------------------------
+
+BONUS_CHARS = ("X", "x")
+
+# Pasos promedio que tarda el bot entre una comida y la siguiente.
+# Sirve para estimar cuántas comidas más entran en lo que queda de
+# partida. Es una estimación gruesa — ajustable si se ve que el bot
+# persigue X de más (subirlo) o de menos (bajarlo).
+BONUS_STEPS_PER_FOOD = 12
+
+# Topes, para que la estimación nunca se dispare ni se anule.
+BONUS_MIN_SCORE = 200
+BONUS_MAX_SCORE = 2500
+
+
+def bonus_value(remaining_moves, multiplier=1):
+    """
+    Cuánto vale (en la escala de score interna, donde una comida
+    alcanzable suma 1000) ir a comer una X ahora mismo.
+
+    Crece con los turnos que quedan —una X al principio de la
+    partida escala muchas comidas; una X a 5 turnos del final casi
+    no escala nada— y baja a medida que sube el multiplicador,
+    porque con x4 ya encima conviene gastar los turnos comiendo
+    dígitos en vez de juntando más X.
+    """
+
+    if remaining_moves is None:
+        remaining_moves = 100
+
+    expected_foods = max(0, remaining_moves) / BONUS_STEPS_PER_FOOD
+
+    value = (250 + 250 * expected_foods) / max(1, multiplier)
+
+    return max(BONUS_MIN_SCORE, min(BONUS_MAX_SCORE, value))
+
 
 def parse_board(board):
     """Convierte el tablero recibido por el servidor en una matriz."""
@@ -79,13 +133,19 @@ def neighbors(rows, position):
 
 def find_snakes(rows, side):
     """
-    Encuentra cabeza propia, cabeza rival, comida y obstáculos.
+    Encuentra cabeza propia, cabeza rival, comida, obstáculos,
+    dígitos y bonus.
 
     La comida "clásica" (*) se devuelve en `food`. Los dígitos
     ('1'-'9', comida de la v3) se devuelven aparte, en `digits`:
     un diccionario {dígito: [posiciones]}, porque no todo dígito
     en el tablero sirve — solo el que corresponda comer ahora
     según el orden ascendente cíclico.
+
+    Las 'X' (v4) van en `bonuses`: son celdas SEGURAS (se pisan
+    sin chocar) que dan +50 y suben el multiplicador un escalón,
+    de forma permanente. Ojo: nunca deben terminar en
+    `obstacles`, o el bot las esquivaría.
     """
 
     enemy = "B" if side == "A" else "A"
@@ -94,6 +154,7 @@ def find_snakes(rows, side):
     enemy_head = None
     food = []
     digits = {}
+    bonuses = []
     obstacles = set()
 
     for r, row in enumerate(rows):
@@ -111,7 +172,10 @@ def find_snakes(rows, side):
             elif cell.isdigit() and cell != "0":
                 digits.setdefault(cell, []).append((r, c))
 
-            elif cell in "abAB":
+            elif cell in BONUS_CHARS:
+                bonuses.append((r, c))
+
+            elif cell in "abAB#":
                 obstacles.add((r, c))
 
     # La cabeza propia es el punto de partida,
@@ -119,7 +183,7 @@ def find_snakes(rows, side):
     if own_head in obstacles:
         obstacles.remove(own_head)
 
-    return own_head, enemy_head, food, obstacles, digits
+    return own_head, enemy_head, food, obstacles, digits, bonuses
 
 
 def get_expected_digit(game_id, digits_present):
@@ -406,6 +470,34 @@ def simulate_survival(rows, start_head, blocked, depth):
     return steps, final_area
 
 
+def enemy_congestion(position, enemy_cells, radius=3):
+    """
+    Cuenta cuántas celdas del cuerpo/cabeza rival hay a una
+    distancia Manhattan <= radius de `position`.
+
+    Sirve para detectar cuándo el bot se está metiendo (o
+    quedando) en una zona apretada junto al rival, ANTES de que
+    el área/movilidad lo note — que solo reacciona una vez que
+    el espacio ya se redujo. Quedarse dando vueltas pegado a un
+    tramo largo de cuerpo rival, aunque el resto del tablero
+    esté vacío, es justamente el patrón que llevó a un choque
+    real en una partida (mucha comida seguía sin comerse, lejos
+    de esa esquina, mientras las dos serpientes se apretujaban
+    ahí durante muchos turnos).
+    """
+
+    count = 0
+
+    for cell in enemy_cells:
+
+        distance = abs(position[0] - cell[0]) + abs(position[1] - cell[1])
+
+        if distance <= radius:
+            count += 1
+
+    return count
+
+
 def choose_direction(
     rows,
     head,
@@ -414,16 +506,24 @@ def choose_direction(
     blocked,
     current_direction,
     preferred_target=None,
-    danger_cells=None
+    danger_cells=None,
+    bonus_cells=None,
+    remaining_moves=None,
+    multiplier=1
 ):
     """
     Decide el próximo movimiento.
-    Combina comida + seguridad + espacio disponible.
+    Combina comida + bonus + seguridad + espacio disponible.
 
     danger_cells: casillas que se pueden pisar (no bloquean el
     movimiento) pero que conviene evitar si hay alternativa —
     hoy en día, los dígitos que NO corresponde comer (v3): comer
     el equivocado cuesta -500 puntos.
+
+    bonus_cells: las 'X' de la v4. Son seguras de pisar y suben
+    el multiplicador de forma permanente. remaining_moves y
+    multiplier se usan para saber cuánto vale desviarse a
+    buscarlas (ver bonus_value).
 
     Devuelve (direccion, target_elegido). target_elegido es la
     comida hacia la que apunta esa decisión (o None si no hay
@@ -434,6 +534,9 @@ def choose_direction(
 
     if danger_cells is None:
         danger_cells = set()
+
+    if bonus_cells is None:
+        bonus_cells = []
 
     moves = legal_moves(
         rows,
@@ -489,6 +592,19 @@ def choose_direction(
     best_direction = None
     best_target = None
     best_score = float("-inf")
+
+    # Celdas del CUERPO rival (sin la cabeza, que ya viene aparte
+    # en enemy_head) — para medir congestión más abajo.
+    enemy_cells = []
+
+    if enemy_head is not None:
+        enemy_letter = rows[enemy_head[0]][enemy_head[1]]
+        enemy_body_letter = enemy_letter.lower()
+        for r, row in enumerate(rows):
+            for c, cell in enumerate(row):
+                if cell == enemy_body_letter:
+                    enemy_cells.append((r, c))
+        enemy_cells.append(enemy_head)
 
     for direction, new_head in moves:
 
@@ -617,6 +733,59 @@ def choose_direction(
                 if distance == 0:
                     eats_now = True
                     score += 600
+
+        # ------------------------------------------------
+        # 4.b v4: las X (bonus de multiplicador).
+        #
+        # Se pisan sin riesgo y el escalón de multiplicador es
+        # permanente, así que conviene ir a buscarlas — pero sin
+        # abandonar la comida: el valor lo decide bonus_value
+        # según los turnos que queden y el multiplicador actual.
+        # ------------------------------------------------
+
+        if bonus_cells:
+
+            closest_bonus = None
+
+            for bonus in bonus_cells:
+
+                bonus_path = bfs_path(
+                    rows,
+                    new_head,
+                    bonus,
+                    simulated_blocked
+                )
+
+                if bonus_path is None:
+                    continue
+
+                if closest_bonus is None or len(bonus_path) < closest_bonus:
+                    closest_bonus = len(bonus_path)
+
+            if closest_bonus is not None:
+
+                value = bonus_value(remaining_moves, multiplier)
+
+                # OJO: sumar `value` como constante no serviría de
+                # nada. Si la X es alcanzable desde todas las
+                # direcciones candidatas, esa constante se suma a
+                # todas por igual y se cancela: no cambiaría
+                # ninguna decisión. Lo que decide de verdad es
+                # cuánto pesa CADA PASO de acercamiento, así que
+                # el valor se traduce en ese peso.
+                #
+                # value 2500 -> 25 por paso (a la par de la comida)
+                # value  200 ->  2 por paso (casi indiferente)
+                step_weight = value / 100.0
+
+                score -= closest_bonus * step_weight
+
+                # Pisarla en este mismo movimiento sí es un evento
+                # puntual de una sola dirección: acá el valor
+                # completo sí corresponde.
+                if closest_bonus == 0:
+                    eats_now = True
+                    score += value
 
         # ------------------------------------------------
         # 5. Penalización fuerte por quedar encerrados.
