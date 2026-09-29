@@ -285,6 +285,176 @@ def reachable_area(rows, start, blocked):
     return len(visited)
 
 
+def trace_own_body(rows, head, body_cells, neck_hint=None, limit=20000):
+    """
+    Reconstruye el orden real del propio cuerpo, de la cabeza a la
+    cola.
+
+    El tablero no dice en qué orden van los segmentos (todos se ven
+    igual, como `a`), así que lo deducimos: como el cuerpo de una
+    víbora es un camino simple (sin bifurcaciones ni cruces
+    consigo mismo), caminamos desde la cabeza pasando por cada
+    celda del cuerpo una sola vez. Casi siempre hay un único camino
+    posible; cuando hay más de una opción, probamos primero la
+    celda que le queda con MENOS salidas libres — así evitamos
+    quedarnos sin por dónde seguir más adelante y tener que volver
+    atrás.
+
+    Ojo con un caso ambiguo: si la víbora está enroscada de forma
+    que la cabeza queda pegada a DOS celdas de su propio cuerpo a
+    la vez (la cola real Y el cuello, el segmento inmediatamente
+    anterior a la cabeza), hay dos caminos igual de válidos
+    geométricamente y no hay forma de saber cuál es cuál mirando
+    solo el tablero de este turno — hace falta memoria del
+    movimiento anterior. `neck_hint` es justamente eso: si sabemos
+    con certeza qué celda es el cuello (porque ahí estaba nuestra
+    propia cabeza el turno pasado), se la pasamos para arrancar el
+    camino por el lado correcto sin tener que adivinar. El error,
+    si no se resuelve, es conservador: como mucho subestima cuánto
+    se libera la cola, nunca al revés.
+
+    Si el cuerpo está tan enroscado que no se completa el camino
+    dentro del presupuesto de pasos, devolvemos el mejor camino
+    parcial encontrado y agregamos el resto de las celdas al final,
+    en cualquier orden. No rompe nada: esas celdas, al no tener un
+    orden confiable, terminan tratándose como si nunca se liberaran
+    (la misma suposición conservadora que ya usábamos antes de
+    esta mejora).
+    """
+
+    if not body_cells:
+        return [head]
+
+    path = [head]
+    seen = {head}
+    best = [head]
+    budget = [limit]
+
+    def free_neighbors(cell):
+        options = []
+        for _, nxt in neighbors(rows, cell):
+            if nxt in body_cells and nxt not in seen:
+                options.append(nxt)
+        return options
+
+    # Si tenemos el dato del cuello, forzamos el primer paso ahí
+    # cuando sea una opción válida — resuelve la ambigüedad de raíz
+    # en vez de dejarla en manos de la heurística.
+    if neck_hint is not None and neck_hint in body_cells:
+        path.append(neck_hint)
+        seen.add(neck_hint)
+        best = list(path)
+
+    def extend():
+
+        if len(path) - 1 == len(body_cells):
+            return True
+
+        budget[0] -= 1
+
+        if budget[0] < 0:
+            return False
+
+        options = free_neighbors(path[-1])
+        options.sort(key=lambda n: len(free_neighbors(n)))
+
+        for n in options:
+
+            path.append(n)
+            seen.add(n)
+
+            if len(path) > len(best):
+                best[:] = path
+
+            if extend():
+                return True
+
+            path.pop()
+            seen.discard(n)
+
+        return False
+
+    if extend():
+        return path
+
+    remaining = body_cells - set(best)
+
+    return best + sorted(remaining)
+
+
+def own_body_free_times(body_order):
+    """
+    A partir del orden cabeza->cola (el que devuelve trace_own_body),
+    calcula en cuántos de NUESTROS PROPIOS movimientos se libera
+    cada celda del cuerpo.
+
+    La cola se libera en el próximo movimiento (1), la celda antes
+    de la cola en 2, y así hasta la celda pegada a la cabeza. Esto
+    asume que no comemos nada mientras tanto — si comemos, la cola
+    NO se mueve ese turno, así que es una estimación optimista, no
+    una garantía exacta. Por eso este cálculo sirve para elegir
+    ENTRE opciones, no para asumir a ciegas que un camino angosto
+    siempre va a estar libre a tiempo.
+    """
+
+    body = body_order[1:]  # sin la cabeza
+    total = len(body)
+
+    return {
+        cell: total - i
+        for i, cell in enumerate(body)
+    }
+
+
+def reachable_area_dynamic(rows, start, blocked, free_times, max_time=60):
+    """
+    Como reachable_area, pero las celdas del PROPIO cuerpo que
+    aparecen en `free_times` se consideran alcanzables una vez que
+    el número de pasos para llegar ahí alcanza el turno en que se
+    liberan — en vez de bloqueadas para siempre.
+
+    Todo lo demás en `blocked` (cuerpo rival, muros, dígitos a
+    evitar) se sigue tratando como obstáculo permanente: no
+    tenemos manera confiable de predecir cuándo se libera lo que
+    no controlamos nosotros.
+    """
+
+    hard_blocked = blocked - set(free_times)
+
+    if start in hard_blocked:
+        return 0
+
+    visited = {start}
+    frontier = [start]
+    time = 0
+
+    while frontier and time < max_time:
+
+        time += 1
+        next_frontier = []
+
+        for cell in frontier:
+            for _, nxt in neighbors(rows, cell):
+
+                if nxt in visited:
+                    continue
+
+                if nxt in hard_blocked:
+                    continue
+
+                free_at = free_times.get(nxt)
+
+                if free_at is not None and free_at > time:
+                    continue
+
+                visited.add(nxt)
+                next_frontier.append(nxt)
+
+        frontier = next_frontier
+
+    return len(visited)
+
+
 def legal_moves(rows, position, blocked):
     """Devuelve movimientos que no chocan inmediatamente."""
 
@@ -307,7 +477,8 @@ def food_score(
     blocked,
     enemy_head,
     preferred_target=None,
-    total_foods=1
+    total_foods=1,
+    next_food=None
 ):
     """
     Puntúa una comida teniendo en cuenta:
@@ -368,6 +539,14 @@ def food_score(
         distance_weight = 25
 
     score -= own_distance * distance_weight
+    # --- PREVISIÓN DE COMBO ---
+    if next_food is not None:
+        # Se simula cuánto costará ir desde el dígito actual hasta el SIGUIENTE
+        path_to_next = bfs_path(rows, food, next_food, blocked)
+        if path_to_next is not None:
+            # Penaliza el trayecto FUTURO. Ponderación (12) para no opacar
+            # la distancia actual, pero forzará a elegir el mejor ángulo de ataque.
+            score -= len(path_to_next) * 12
 
     # Quiere llegar antes que el rival.
     race_difference = enemy_distance - own_distance
@@ -397,7 +576,8 @@ def choose_target(
     foods,
     blocked,
     enemy_head,
-    preferred_target=None
+    preferred_target=None,
+    next_food=None
 ):
     """Elige la comida más conveniente."""
 
@@ -415,7 +595,8 @@ def choose_target(
             blocked,
             enemy_head,
             preferred_target,
-            total_foods
+            total_foods,
+            next_food
         )
 
         if score is None:
@@ -430,19 +611,30 @@ def choose_target(
     return best_food
 
 
-def simulate_survival(rows, start_head, blocked, depth):
+def simulate_survival(rows, start_head, blocked, depth, free_in=None):
     """
     Simula varios movimientos propios hacia adelante para detectar
     si un camino que HOY parece amplio termina cerrándose (un
     "cuello de botella" que recién se nota unos turnos más tarde).
 
+    free_in (opcional): {celda: en cuántos movimientos propios se
+    libera}, de own_body_free_times(). Sin esto, el cuerpo propio se
+    trata como bloqueado para siempre durante toda la simulación (lo
+    conservador de siempre). Con esto, la cola y lo que va detrás
+    se van habilitando a medida que avanza la simulación — igual
+    que pasaría en la partida real.
     """
 
     current_blocked = set(blocked)
     current_head = start_head
     steps = 0
 
-    for _ in range(depth):
+    for step_number in range(1, depth + 1):
+
+        if free_in:
+            for cell, free_at in free_in.items():
+                if free_at <= step_number:
+                    current_blocked.discard(cell)
 
         candidates = legal_moves(rows, current_head, current_blocked)
 
@@ -498,7 +690,79 @@ def enemy_congestion(position, enemy_cells, radius=3):
     return count
 
 
-def choose_direction(
+def voronoi_score(rows, own_head, enemy_head, blocked):
+    """
+    Estima el control del tablero usando la idea del diagrama de Voronoi:
+    hace un BFS simultáneo desde ambas cabezas y clasifica cada celda libre
+    según quién llega primero.
+
+    Devuelve (celdas_propias, celdas_rival): cuántas celdas "gana" cada uno.
+    La diferencia (celdas_propias - celdas_rival) da una medida de control:
+    positivo = ventaja propia, negativo = ventaja del rival.
+
+    Por qué esto importa más que solo mirar el área propia:
+    podés tener 100 celdas alcanzables, pero si el rival controla las 80
+    donde está la comida, esa área no te sirve de mucho. El Voronoi lo detecta
+    porque pondera QUIÉN llega antes a cada zona, no solo si vos podés llegar.
+
+    Si no hay rival (enemy_head es None), todas las celdas alcanzables son
+    "propias" — la función sigue siendo útil como medida de área pura.
+
+    Nota sobre tableros con cola que se libera: usamos blocked tal cual se
+    recibe (el blocked estático del turno), igual que reachable_area. No
+    modelamos la cola que se va liberando porque hacerlo para DOS jugadores
+    a la vez introduce suposiciones sobre los movimientos del rival que no
+    tenemos manera de verificar. Es conservador pero consistente.
+    """
+
+    if enemy_head is None:
+        return reachable_area(rows, own_head, blocked), 0
+
+    # BFS simultáneo desde ambas cabezas.
+    # Cada celda registra (distancia, dueño): "A" si llegamos primero
+    # nosotros, "B" si llega primero el rival, "tie" si empatan.
+    claimed = {}
+    queue = deque()
+
+    if own_head not in blocked:
+        queue.append((own_head, 0, "A"))
+        claimed[own_head] = (0, "A")
+
+    if enemy_head not in blocked:
+        queue.append((enemy_head, 0, "B"))
+        # Si las dos cabezas están en la misma celda (no puede pasar
+        # en una partida real, pero lo manejamos por robustez):
+        if enemy_head == own_head:
+            claimed[enemy_head] = (0, "tie")
+        else:
+            claimed[enemy_head] = (0, "B")
+
+    while queue:
+
+        pos, dist, owner = queue.popleft()
+
+        for _, nxt in neighbors(rows, pos):
+
+            if nxt in blocked:
+                continue
+
+            new_dist = dist + 1
+
+            if nxt not in claimed:
+                claimed[nxt] = (new_dist, owner)
+                queue.append((nxt, new_dist, owner))
+
+            elif claimed[nxt][0] == new_dist and claimed[nxt][1] != owner:
+                # Mismo paso: empate — ninguno se lleva la celda.
+                claimed[nxt] = (new_dist, "tie")
+
+    own_cells = sum(1 for d, o in claimed.values() if o == "A")
+    enemy_cells = sum(1 for d, o in claimed.values() if o == "B")
+
+    return own_cells, enemy_cells
+
+
+def calculate_direction(
     rows,
     head,
     enemy_head,
@@ -509,7 +773,8 @@ def choose_direction(
     danger_cells=None,
     bonus_cells=None,
     remaining_moves=None,
-    multiplier=1
+    multiplier=1,
+    next_food=None
 ):
     """
     Decide el próximo movimiento.
@@ -606,6 +871,44 @@ def choose_direction(
                     enemy_cells.append((r, c))
         enemy_cells.append(enemy_head)
 
+    # Nuestro propio largo (cabeza + cuerpo) y las celdas exactas
+    # que ocupa. Sirve para detectar "encierros" que el área por sí
+    # sola no deja ver: un espacio de, digamos, 5 celdas puede
+    # parecer "espacio de sobra", pero si nuestra víbora ya mide
+    # 12, en algún momento no vamos a entrar ahí sin chocarnos
+    # contra nosotros mismos.
+    own_letter = rows[head[0]][head[1]]
+    own_body_letter = own_letter.lower()
+    own_body_cells = set()
+
+    for r, row in enumerate(rows):
+        for c, cell in enumerate(row):
+            if cell == own_body_letter:
+                own_body_cells.add((r, c))
+
+    own_body_length = len(own_body_cells) + 1  # la cabeza cuenta
+
+    # Orden real del cuerpo (de la cabeza a la cola) y en qué
+    # movimiento propio se libera cada celda. Si la víbora está tan
+    # enroscada que no se pudo reconstruir el camino completo,
+    # trace_own_body ya devuelve su mejor aproximación (nunca peor
+    # que tratar todo como bloqueado para siempre, que era el
+    # comportamiento de antes de esta mejora).
+    # Si sabemos hacia dónde nos movimos el turno pasado, podemos
+    # calcular exactamente dónde estaba la cabeza antes — esa
+    # celda es, sin ninguna duda, el cuello (el segmento pegado a
+    # la cabeza actual). Se la damos a trace_own_body para que no
+    # tenga que adivinar en el caso ambiguo (víbora enroscada con
+    # la cabeza pegada a dos celdas de su propio cuerpo a la vez).
+    neck_hint = None
+
+    if current_direction in DIRECTIONS:
+        dr, dc = DIRECTIONS[current_direction]
+        neck_hint = (head[0] - dr, head[1] - dc)
+
+    own_body_order = trace_own_body(rows, head, own_body_cells, neck_hint)
+    own_free_times = own_body_free_times(own_body_order)
+
     for direction, new_head in moves:
 
         # ------------------------------------------------
@@ -622,14 +925,49 @@ def choose_direction(
         # 2. Calcula cuánto espacio tendrá.
         # ------------------------------------------------
 
-        area = reachable_area(
+        area = reachable_area_dynamic(
             rows,
             new_head,
-            simulated_blocked
+            simulated_blocked,
+            own_free_times
         )
 
         # Mucho espacio = muy bueno.
         score = area * 8
+
+        # Control del tablero (Voronoi): BFS simultáneo desde nuestra
+        # nueva posición y la cabeza rival. Cuantas más celdas libres
+        # llegamos antes que el rival, mejor — porque eso predice quién
+        # va a tener acceso a la comida futura y a las zonas abiertas.
+        #
+        # El área propia ya captura "cuánto espacio tengo", pero no "cuánto
+        # de ese espacio me quedo yo vs el rival". El Voronoi agrega esa
+        # dimensión: podés tener 100 celdas alcanzables, pero si el rival
+        # controla las 80 donde está la comida, esa ventaja no existe.
+        #
+        # Peso moderado (4): suficiente para mover la aguja entre opciones
+        # casi iguales, sin tapar señales más importantes como la comida
+        # (+1000) o la detección de encierro (-5000+).
+        own_voronoi, enemy_voronoi = voronoi_score(
+            rows,
+            new_head,
+            enemy_head,
+            simulated_blocked
+        )
+
+        voronoi_advantage = own_voronoi - enemy_voronoi
+        score += voronoi_advantage * 4
+
+        # Detección de encierro por largo propio: si el área
+        # alcanzable es menor que nuestra propia víbora, no importa
+        # que "parezca" espacio suficiente — no vamos a caber ahí
+        # sin chocarnos contra nuestro propio cuerpo eventualmente.
+        # Cuanto más grande la diferencia, peor (y esto es una
+        # señal MÁS fuerte y MÁS temprana que el look-ahead de más
+        # abajo, que recién detecta el problema al simularlo).
+        if area < own_body_length:
+            faltante = own_body_length - area
+            score -= 5000 + 200 * faltante
 
         # v3: pisar un dígito que NO corresponde comer ahora
         # cuesta -500 puntos reales. Lo evitamos con una
@@ -662,7 +1000,8 @@ def choose_direction(
             rows,
             new_head,
             simulated_blocked,
-            LOOKAHEAD_DEPTH
+            LOOKAHEAD_DEPTH,
+            free_in=own_free_times
         )
 
         # Si sobrevive todo el horizonte simulado, no detectamos
@@ -703,7 +1042,8 @@ def choose_direction(
             foods,
             simulated_blocked,
             enemy_head,
-            preferred_target
+            preferred_target,
+            next_food
         )
 
         eats_now = False
@@ -834,3 +1174,75 @@ def choose_direction(
             best_target = target
 
     return best_direction, best_target
+
+def choose_direction(turn_data):
+    """
+    Función puente: Recibe el JSON del turno (turn_data) desde run.py,
+    prepara las variables, calcula el siguiente dígito para armar combos,
+    y delega la decisión matemática a calculate_direction.
+    """
+    game_id = turn_data.get("game_id")
+    board = turn_data.get("board")
+    side = turn_data.get("side")
+
+    rows = parse_board(board)
+    head, enemy_head, foods, blocked, digits, bonuses = find_snakes(rows, side)
+
+    if head is None:
+        return "up"  # Fallback seguro por si no nos encontramos en el tablero
+
+    remaining_moves = turn_data.get("remaining_moves")
+    multiplier = turn_data.get("multiplier_1" if side == "A" else "multiplier_2") or 1
+
+    # Dígito actual a comer
+    expected_digit_str = get_expected_digit(game_id, digits.keys())
+    target_foods = list(foods) + digits.get(expected_digit_str, [])
+
+    # --- LÓGICA DE COMBO: Calcular cuál es el SIGUIENTE dígito ---
+    next_food_pos = None
+    if expected_digit_str is not None:
+        next_digit_int = (int(expected_digit_str) % 9) + 1
+        next_digit_str = str(next_digit_int)
+        
+        # Si el siguiente dígito ya está en el tablero, extraemos su coordenada
+        if next_digit_str in digits and len(digits[next_digit_str]) > 0:
+            next_food_pos = digits[next_digit_str][0]
+
+    # Casillas de peligro (dígitos incorrectos)
+    danger_cells = set()
+    for d, positions in digits.items():
+        if d != expected_digit_str:
+            danger_cells.update(positions)
+
+    current_direction = turn_data.get("direction") or LAST_DIRECTION.get(game_id)
+
+    # Delegar la decisión al motor
+    direction, target = calculate_direction(
+        rows,
+        head,
+        enemy_head,
+        target_foods,
+        blocked,
+        current_direction,
+        preferred_target=LAST_TARGET.get(game_id),
+        danger_cells=danger_cells,
+        bonus_cells=bonuses,
+        remaining_moves=remaining_moves,
+        multiplier=multiplier,
+        next_food=next_food_pos  # Paso el objetivo del combo
+    )
+
+    if direction is not None:
+        LAST_DIRECTION[game_id] = direction
+        LAST_TARGET[game_id] = target
+
+        # Si el bot decidió un movimiento que come el dígito, avanzamos el registro
+        if expected_digit_str is not None:
+            dr, dc = DIRECTIONS[direction]
+            new_head = (head[0] + dr, head[1] + dc)
+            if new_head in digits.get(expected_digit_str, []):
+                advance_expected_digit(game_id, expected_digit_str)
+                
+        return direction
+
+    return "up"
