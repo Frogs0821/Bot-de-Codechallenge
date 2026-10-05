@@ -3,6 +3,18 @@ Reglas de decisión del bot de Snake: parseo del tablero, cálculo de
 comida (clásica y dígitos v3), seguridad (área/movilidad/look-ahead)
 y elección final de movimiento.
 
+v6 (30 sep 2026): cada dígito del tablero aparece en 3-5 copias.
+    Comer cualquiera de ellas elimina TODAS las copias de ese dígito
+    y avanza al siguiente.  El bot elige la copia más conveniente.
+
+v7 (7 oct 2026): chocar (cuerpo propio, borde, #, oponente) ya no
+    termina la partida.  La serpiente se queda, conserva 3 celdas, y
+    el resto del cuerpo se convierte en comida de crash que solo el
+    oponente puede comer (+100 × multiplicador).  El primer crash
+    pone el score a 0; los siguientes restan -500.  Las partidas
+    duran 400 movimientos.  Comida de crash propia se limpia sin
+    puntos; la del rival alimenta y da crecimiento.
+
 Separado de run.py (que se encarga solo de la conexión websocket,
 logging y el dibujo en consola) para poder ajustar la estrategia
 sin tocar nada del manejo de la conexión.
@@ -34,6 +46,12 @@ LAST_TARGET = {}
 # tablero (mejor estimación posible sin más info) y lo vamos
 # avanzando cada vez que nosotros mismos comemos el correcto.
 EXPECTED_DIGIT = {}
+
+# v7 (7 oct 2026): cuántas veces crasheó cada jugador en la partida.
+# Clave = game_id, valor = número de crashes propios registrados.
+# Se usa para decidir la penalización: el primer crash pone el score
+# a 0 (wiped), los siguientes restan -500.
+CRASH_COUNT = {}
 
 # ---------------------------------------------------------------
 # v4 (16 sep 2026): el tablero suma dos 'X'.
@@ -135,6 +153,7 @@ def find_snakes(rows, side):
     """
     Encuentra cabeza propia, cabeza rival, comida, obstáculos,
     dígitos y bonus.
+    dígitos, bonus y comida de crash (v7).
 
     La comida "clásica" (*) se devuelve en `food`. Los dígitos
     ('1'-'9', comida de la v3) se devuelven aparte, en `digits`:
@@ -146,9 +165,20 @@ def find_snakes(rows, side):
     sin chocar) que dan +50 y suben el multiplicador un escalón,
     de forma permanente. Ojo: nunca deben terminar en
     `obstacles`, o el bot las esquivaría.
+
+    v7: comida de crash (Ⓐ / Ⓑ, Unicode U+24B6 / U+24B7).
+    - La del RIVAL es comida que podemos comer: +100 y crecemos.
+      Va en `crash_food_enemy`.
+    - La PROPIA la podemos pisar para limpiarla (denegarla al
+      rival): no da puntos ni crecimiento. No va como obstáculo.
     """
 
     enemy = "B" if side == "A" else "A"
+
+    # Comida de crash: Ⓐ (U+24B6) y Ⓑ (U+24B7).
+    # El servidor podría usar variantes minúsculas ⓐ (U+24D0) / ⓑ (U+24D1).
+    own_crash_chars = {"\u24b6", "\u24d0"} if side == "A" else {"\u24b7", "\u24d1"}
+    enemy_crash_chars = {"\u24b7", "\u24d1"} if side == "A" else {"\u24b6", "\u24d0"}
 
     own_head = None
     enemy_head = None
@@ -156,6 +186,8 @@ def find_snakes(rows, side):
     digits = {}
     bonuses = []
     obstacles = set()
+    crash_food_enemy = []
+    own_crash_food = []
 
     for r, row in enumerate(rows):
         for c, cell in enumerate(row):
@@ -175,15 +207,32 @@ def find_snakes(rows, side):
             elif cell in BONUS_CHARS:
                 bonuses.append((r, c))
 
-            elif cell in "abAB#":
+            elif cell in enemy_crash_chars:
+                # Comida de crash del rival: la podemos comer (+100)
+                crash_food_enemy.append((r, c))
+
+            elif cell in own_crash_chars:
+                # Nuestra comida de crash: la podemos pisar para
+                # limpiarla (denegar al rival), sin obtener puntos.
+                # NO es obstáculo ni comida — solo pisable.
+                own_crash_food.append((r, c))
+
+            elif cell in "ab#":
                 obstacles.add((r, c))
+
+            # Celdas con letras del rival (cabeza + cuerpo) que no
+            # son crash food: son obstáculo.  Pero la cabeza propia
+            # y su cuerpo solo se detectan arriba por su letra exacta.
 
     # La cabeza propia es el punto de partida,
     # así que no debe considerarse un obstáculo.
     if own_head in obstacles:
         obstacles.remove(own_head)
 
-    return own_head, enemy_head, food, obstacles, digits, bonuses
+    return (
+        own_head, enemy_head, food, obstacles, digits, bonuses,
+        crash_food_enemy, own_crash_food
+    )
 
 
 def get_expected_digit(game_id, digits_present):
@@ -756,8 +805,8 @@ def voronoi_score(rows, own_head, enemy_head, blocked):
                 # Mismo paso: empate — ninguno se lleva la celda.
                 claimed[nxt] = (new_dist, "tie")
 
-    own_cells = sum(1 for d, o in claimed.values() if o == "A")
-    enemy_cells = sum(1 for d, o in claimed.values() if o == "B")
+    own_cells = sum(1 for _, owner in claimed.values() if owner == "A")
+    enemy_cells = sum(1 for _, owner in claimed.values() if owner == "B")
 
     return own_cells, enemy_cells
 
@@ -774,8 +823,12 @@ def calculate_direction(
     bonus_cells=None,
     remaining_moves=None,
     multiplier=1,
-    next_food=None
-):
+    next_food=None,
+    crash_food_enemy=None,
+    own_crash_food=None,
+    own_score=None,
+    crash_count=0,
+    ):
     """
     Decide el próximo movimiento.
     Combina comida + bonus + seguridad + espacio disponible.
@@ -790,6 +843,20 @@ def calculate_direction(
     multiplier se usan para saber cuánto vale desviarse a
     buscarlas (ver bonus_value).
 
+    crash_food_enemy (v7): comida de crash del RIVAL en el
+    tablero. Son celdas seguras que podemos comer para +100 y
+    crecimiento.  Se tratan como comida adicional con un
+    valor fijo.
+
+    own_crash_food (v7): nuestra propia comida de crash en el
+    tablero.  La podemos pisar para limpiarla (denegar al rival)
+    sin obtener puntos ni crecer.  No es obstáculo.
+
+    own_score / crash_count (v7): usados para evaluar el riesgo
+    de crashear. Con score alto y sin crashes previos, un crash
+    es devastador (wipe a 0). Con score bajo o muchos crashes,
+    es menos dramático.
+
     Devuelve (direccion, target_elegido). target_elegido es la
     comida hacia la que apunta esa decisión (o None si no hay
     ninguna alcanzable) — se guarda para pasarla como
@@ -802,6 +869,12 @@ def calculate_direction(
 
     if bonus_cells is None:
         bonus_cells = []
+
+    if crash_food_enemy is None:
+        crash_food_enemy = []
+
+    if own_crash_food is None:
+        own_crash_food = []
 
     moves = legal_moves(
         rows,
@@ -1017,6 +1090,12 @@ def calculate_direction(
 
         # ------------------------------------------------
         # 3. Evita acercarse demasiado al rival.
+        #
+        # v7: chocar ya no termina la partida, pero sigue
+        # costando caro: el primer crash pone el score a 0;
+        # los siguientes restan -500.  Además perdemos cuerpo
+        # (todo excepto 3 celdas).  La penalización refleja
+        # cuánto duele según el estado actual.
         # ------------------------------------------------
 
         if enemy_head is not None:
@@ -1028,9 +1107,22 @@ def calculate_direction(
 
             if enemy_distance == 0:
                 score -= 10000
+                # Colisión directa.  Antes era mortal, ahora es
+                # un crash que duele pero no mata.
+                if crash_count == 0 and own_score is not None and own_score > 0:
+                    # Primer crash con score positivo: perderíamos
+                    # todo el score (wipe a 0).  Muy malo.
+                    score -= max(3000, own_score * 2)
+                else:
+                    # Crashes posteriores: -500 fijo.
+                    # Sigue siendo malo pero no catastrófico.
+                    score -= 2000
 
             elif enemy_distance == 1:
                 score -= 500
+                # Una celda de distancia: riesgo alto de crash
+                # el turno siguiente.
+                score -= 400
 
         # ------------------------------------------------
         # 4. Busca la mejor comida desde esta posición.
@@ -1128,6 +1220,90 @@ def calculate_direction(
                     score += value
 
         # ------------------------------------------------
+        # 4.c v7: comida de crash del rival.
+        #
+        # Cada celda de crash food del rival vale +100 (×mult)
+        # al comerla, y además hace crecer. Es comida gratuita
+        # que no requiere seguir ningún orden.  Se puntúa como
+        # comida adicional con valor fijo.
+        # ------------------------------------------------
+
+        if crash_food_enemy:
+
+            # Valor base de cada unidad de crash food (+100).
+            # Con multiplicador alto vale más perseguirla.
+            crash_food_value = 100 * multiplier
+
+            # Buscamos la crash food más cercana.
+            closest_crash = None
+
+            for cf in crash_food_enemy:
+
+                cf_path = bfs_path(
+                    rows,
+                    new_head,
+                    cf,
+                    simulated_blocked
+                )
+
+                if cf_path is None:
+                    continue
+
+                if closest_crash is None or len(cf_path) < closest_crash:
+                    closest_crash = len(cf_path)
+
+            if closest_crash is not None:
+                # Peso por paso: similar a la comida normal pero
+                # escalado por su valor.  crash_food_value de 100
+                # da ~10 por paso; con x3 mult da ~30 por paso.
+                cf_step_weight = min(crash_food_value / 10.0, 25)
+                score -= closest_crash * cf_step_weight
+
+                # Pisarla ahora: gran premio.
+                if closest_crash == 0:
+                    eats_now = True
+                    score += crash_food_value * 3
+
+        # ------------------------------------------------
+        # 4.d v7: nuestra propia comida de crash — denegación.
+        #
+        # Si hay comida de crash NUESTRA en el tablero, el
+        # rival puede comerla para ganar +100 y crecer. Si
+        # estamos cerca y no hay mejor opción, conviene pisarla
+        # para limpiarla.  Pero es baja prioridad comparada
+        # con comer dígitos reales.
+        # ------------------------------------------------
+
+        if own_crash_food:
+
+            closest_own_crash = None
+
+            for ocf in own_crash_food:
+
+                ocf_path = bfs_path(
+                    rows,
+                    new_head,
+                    ocf,
+                    simulated_blocked
+                )
+
+                if ocf_path is None:
+                    continue
+
+                if closest_own_crash is None or len(ocf_path) < closest_own_crash:
+                    closest_own_crash = len(ocf_path)
+
+            if closest_own_crash is not None:
+                # Incentivo bajo: solo vale la pena si estamos
+                # cerca y no hay dígitos accesibles.
+                score -= closest_own_crash * 3
+
+                # Pisarla ahora: moderadamente bueno (deniega
+                # al rival sin coste propio).
+                if closest_own_crash == 0:
+                    score += 150
+
+        # ------------------------------------------------
         # 5. Penalización fuerte por quedar encerrados.
         # ------------------------------------------------
 
@@ -1180,13 +1356,25 @@ def choose_direction(turn_data):
     Función puente: Recibe el JSON del turno (turn_data) desde run.py,
     prepara las variables, calcula el siguiente dígito para armar combos,
     y delega la decisión matemática a calculate_direction.
+
+    v6: cada dígito puede tener 3-5 copias. El bot elige la mejor.
+        Al comer cualquier copia, avanza el dígito y todas las
+        copias desaparecen.  El combo lookahead (next_food) busca
+        la copia más cercana del siguiente dígito.
+
+    v7: comida de crash (Ⓐ/Ⓑ) se extrae del tablero y se pasa
+        a calculate_direction. Se trackea crash_count para decidir
+        la penalización correcta.
     """
     game_id = turn_data.get("game_id")
     board = turn_data.get("board")
     side = turn_data.get("side")
 
     rows = parse_board(board)
-    head, enemy_head, foods, blocked, digits, bonuses = find_snakes(rows, side)
+    (
+    head, enemy_head, foods, blocked, digits, bonuses,
+    crash_food_enemy, own_crash_food
+    ) = find_snakes(rows, side)
 
     if head is None:
         return "up"  # Fallback seguro por si no nos encontramos en el tablero
@@ -1194,19 +1382,40 @@ def choose_direction(turn_data):
     remaining_moves = turn_data.get("remaining_moves")
     multiplier = turn_data.get("multiplier_1" if side == "A" else "multiplier_2") or 1
 
+    # v7: score propio y crash count
+    own_score = turn_data.get("score_1" if side == "A" else "score_2")
+    crash_count = CRASH_COUNT.get(game_id, 0)
+
     # Dígito actual a comer
     expected_digit_str = get_expected_digit(game_id, digits.keys())
+
+    # v6: todas las copias del dígito esperado son comida válida.
+    # El bot elegirá la mejor vía choose_target → food_score.
     target_foods = list(foods) + digits.get(expected_digit_str, [])
 
     # --- LÓGICA DE COMBO: Calcular cuál es el SIGUIENTE dígito ---
+    # --- LÓGICA DE COMBO (v6-aware): Calcular cuál es el SIGUIENTE dígito ---
+    # Con v6, el siguiente dígito también puede tener varias copias.
+    # Elegimos la más cercana a nuestra cabeza como referencia para el combo.
     next_food_pos = None
     if expected_digit_str is not None:
         next_digit_int = (int(expected_digit_str) % 9) + 1
         next_digit_str = str(next_digit_int)
         
         # Si el siguiente dígito ya está en el tablero, extraemos su coordenada
+
+        # v6: buscar la copia más cercana del siguiente dígito
         if next_digit_str in digits and len(digits[next_digit_str]) > 0:
             next_food_pos = digits[next_digit_str][0]
+            if head is not None:
+                best_dist = float("inf")
+                for pos in digits[next_digit_str]:
+                    dist = abs(head[0] - pos[0]) + abs(head[1] - pos[1])
+                    if dist < best_dist:
+                        best_dist = dist
+                        next_food_pos = pos
+            else:
+                next_food_pos = digits[next_digit_str][0]
 
     # Casillas de peligro (dígitos incorrectos)
     danger_cells = set()
@@ -1229,20 +1438,31 @@ def choose_direction(turn_data):
         bonus_cells=bonuses,
         remaining_moves=remaining_moves,
         multiplier=multiplier,
-        next_food=next_food_pos  # Paso el objetivo del combo
+        next_food=next_food_pos,
+        crash_food_enemy=crash_food_enemy,
+        own_crash_food=own_crash_food,
+        own_score=own_score,
+        crash_count=crash_count,
     )
 
-    if direction is not None:
-        LAST_DIRECTION[game_id] = direction
-        LAST_TARGET[game_id] = target
+    if direction is None:
+        direction = "up"
 
-        # Si el bot decidió un movimiento que come el dígito, avanzamos el registro
-        if expected_digit_str is not None:
-            dr, dc = DIRECTIONS[direction]
-            new_head = (head[0] + dr, head[1] + dc)
-            if new_head in digits.get(expected_digit_str, []):
-                advance_expected_digit(game_id, expected_digit_str)
-                
-        return direction
+    LAST_DIRECTION[game_id] = direction
+    LAST_TARGET[game_id] = target
 
-    return "up"
+    dr, dc = DIRECTIONS[direction]
+    new_head = (head[0] + dr, head[1] + dc)
+    if (
+        not inside_board(rows, *new_head)
+        or new_head in blocked
+        or new_head == enemy_head
+    ):
+        CRASH_COUNT[game_id] = crash_count + 1
+
+    # Si el bot decidió un movimiento que come el dígito, avanzamos el registro
+    if expected_digit_str is not None:
+        if new_head in digits.get(expected_digit_str, []):
+            advance_expected_digit(game_id, expected_digit_str)
+
+    return direction

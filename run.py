@@ -2,9 +2,7 @@ import asyncio
 import json
 import sys
 import time
-
 import websockets
-
 import rules
 
 SERVER_URI = "wss://server.codechallenge.net.ar/ws?token={}"
