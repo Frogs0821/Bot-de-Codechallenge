@@ -26,17 +26,15 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: 
+          pip install -r requirements.txt
+          pip install coverage
       
       - name: Radon Analysis
         run: radon cc . -s -a
-
-      - name: Run tests
-        run: python -m unittest discover -v
       
       - name: Ejecutar tests y medir cobertura
-        run: 
-          coverage run -m unittest discover
+        run: coverage run -m unittest discover
           
       - name: Verificar umbral del 90%
         run: 
