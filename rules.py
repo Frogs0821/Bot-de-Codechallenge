@@ -504,14 +504,16 @@ def reachable_area_dynamic(rows, start, blocked, free_times, max_time=60):
     return len(visited)
 
 
-def legal_moves(rows, position, blocked):
+def legal_moves(rows, position, blocked, passable_cells=None):
     """Devuelve movimientos que no chocan inmediatamente."""
 
     result = []
 
     for direction, nxt in neighbors(rows, position):
 
-        if nxt in blocked:
+        if nxt in blocked and (
+            passable_cells is None or nxt not in passable_cells
+        ):
             continue
 
         result.append((direction, nxt))
@@ -876,10 +878,41 @@ def calculate_direction(
     if own_crash_food is None:
         own_crash_food = []
 
+    own_letter = rows[head[0]][head[1]]
+    own_body_letter = own_letter.lower()
+    own_body_cells = {
+        (r, c)
+        for r, row in enumerate(rows)
+        for c, cell in enumerate(row)
+        if cell == own_body_letter
+    }
+    own_body_length = len(own_body_cells) + 1
+
+    neck_hint = None
+    if current_direction in DIRECTIONS:
+        dr, dc = DIRECTIONS[current_direction]
+        neck_hint = (head[0] - dr, head[1] - dc)
+
+    own_body_order = trace_own_body(rows, head, own_body_cells, neck_hint)
+    own_free_times = own_body_free_times(own_body_order)
+
+    tail_cells = set()
+    if (
+        len(own_body_cells) > 1
+        and neck_hint in own_body_cells
+        and own_body_order[-1] != neck_hint
+        and all(
+            abs(first[0] - second[0]) + abs(first[1] - second[1]) == 1
+            for first, second in zip(own_body_order, own_body_order[1:])
+        )
+    ):
+        tail_cells.add(own_body_order[-1])
+
     moves = legal_moves(
         rows,
         head,
-        blocked
+        blocked,
+        passable_cells=tail_cells,
     )
 
     if not moves:
@@ -943,44 +976,6 @@ def calculate_direction(
                 if cell == enemy_body_letter:
                     enemy_cells.append((r, c))
         enemy_cells.append(enemy_head)
-
-    # Nuestro propio largo (cabeza + cuerpo) y las celdas exactas
-    # que ocupa. Sirve para detectar "encierros" que el área por sí
-    # sola no deja ver: un espacio de, digamos, 5 celdas puede
-    # parecer "espacio de sobra", pero si nuestra víbora ya mide
-    # 12, en algún momento no vamos a entrar ahí sin chocarnos
-    # contra nosotros mismos.
-    own_letter = rows[head[0]][head[1]]
-    own_body_letter = own_letter.lower()
-    own_body_cells = set()
-
-    for r, row in enumerate(rows):
-        for c, cell in enumerate(row):
-            if cell == own_body_letter:
-                own_body_cells.add((r, c))
-
-    own_body_length = len(own_body_cells) + 1  # la cabeza cuenta
-
-    # Orden real del cuerpo (de la cabeza a la cola) y en qué
-    # movimiento propio se libera cada celda. Si la víbora está tan
-    # enroscada que no se pudo reconstruir el camino completo,
-    # trace_own_body ya devuelve su mejor aproximación (nunca peor
-    # que tratar todo como bloqueado para siempre, que era el
-    # comportamiento de antes de esta mejora).
-    # Si sabemos hacia dónde nos movimos el turno pasado, podemos
-    # calcular exactamente dónde estaba la cabeza antes — esa
-    # celda es, sin ninguna duda, el cuello (el segmento pegado a
-    # la cabeza actual). Se la damos a trace_own_body para que no
-    # tenga que adivinar en el caso ambiguo (víbora enroscada con
-    # la cabeza pegada a dos celdas de su propio cuerpo a la vez).
-    neck_hint = None
-
-    if current_direction in DIRECTIONS:
-        dr, dc = DIRECTIONS[current_direction]
-        neck_hint = (head[0] - dr, head[1] - dc)
-
-    own_body_order = trace_own_body(rows, head, own_body_cells, neck_hint)
-    own_free_times = own_body_free_times(own_body_order)
 
     for direction, new_head in moves:
 

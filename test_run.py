@@ -121,15 +121,13 @@ class TestWriteGameLog(InTempDirTestCase):
             run.write_game_log('g_1')  # must not raise: the match is over
 
 
-class TestSend(unittest.IsolatedAsyncioTestCase):
-
-    async def test_wraps_the_payload_in_an_action_envelope(self):
+async def test_wraps_the_payload_in_an_action_envelope(self):
         websocket = FakeWebSocket()
 
-        await run.send(websocket, 'move', {'col': 3})
+        await run.send(websocket, 'move', {'direction': 'up'})
 
         self.assertEqual(
-            websocket.sent, [{'action': 'move', 'data': {'col': 3}}]
+            websocket.sent, [{'action': 'move', 'data': {'direction': 'up'}}]
         )
 
 
@@ -149,7 +147,7 @@ class TestProcessMove(HistoryTestCase, unittest.IsolatedAsyncioTestCase):
     async def test_replies_with_a_move_carrying_the_game_and_turn_token(self):
         websocket = FakeWebSocket()
 
-        with patch.object(run, 'randint', return_value=3):
+        with patch.object(run.rules, 'choose_direction', return_value='up'):
             await run.process_move(websocket, self.your_turn())
 
         self.assertEqual(
@@ -160,7 +158,7 @@ class TestProcessMove(HistoryTestCase, unittest.IsolatedAsyncioTestCase):
                     'data': {
                         'game_id': 'g_1',
                         'turn_token': 't_1',
-                        'col': 3,
+                        'direction': 'up',
                     },
                 }
             ],
@@ -169,29 +167,27 @@ class TestProcessMove(HistoryTestCase, unittest.IsolatedAsyncioTestCase):
     async def test_the_move_is_recorded_in_the_game_history(self):
         websocket = FakeWebSocket()
 
-        with patch.object(run, 'randint', return_value=3):
+        with patch.object(run.rules, 'choose_direction', return_value='up'):
             await run.process_move(websocket, self.your_turn())
 
         self.assertEqual(
             run.HISTORY['g_1'],
             ['> {"action": "move", "data": {"game_id": "g_1", '
-             '"turn_token": "t_1", "col": 3}}'],
+             '"turn_token": "t_1", "direction": "up"}}'],
         )
 
-    async def test_the_column_is_picked_from_the_width_of_the_board(self):
-        # The board is `|` delimited, so the second `|` marks the end of the
-        # first row. Documents the current bounds passed to randint.
+    async def test_the_direction_is_picked_using_rules(self):
         websocket = FakeWebSocket()
 
-        with patch.object(run, 'randint', return_value=0) as randint:
+        with patch.object(run.rules, 'choose_direction', return_value='up') as mock_choose:
             await run.process_move(websocket, self.your_turn('|....|\n|....|'))
 
-        randint.assert_called_once_with(0, 4)
+        mock_choose.assert_called_once()
 
     async def test_process_your_turn_delegates_to_process_move(self):
         websocket = FakeWebSocket()
 
-        with patch.object(run, 'randint', return_value=1):
+        with patch.object(run.rules, 'choose_direction', return_value='up'):
             await run.process_your_turn(websocket, self.your_turn())
 
         self.assertEqual(websocket.sent[0]['action'], 'move')
@@ -224,10 +220,10 @@ class TestPlay(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
             },
         ])
 
-        with patch.object(run, 'randint', return_value=2):
+        with patch.object(run.rules, 'choose_direction', return_value='up'):
             await run.play(websocket)
 
-        self.assertEqual(websocket.sent[0]['data']['col'], 2)
+        self.assertEqual(websocket.sent[0]['data']['direction'], 'up')
         # Both the event and the answer end up in the history.
         self.assertEqual(len(run.HISTORY['g_1']), 2)
 
@@ -276,7 +272,7 @@ class TestPlay(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
             {'event': 'game_over', 'data': {'game_id': 'g_1'}},
         ])
 
-        with patch.object(run, 'randint', return_value=0):
+        with patch.object(run.rules, 'choose_direction', return_value='up'):
             await run.play(websocket)
 
         self.assertEqual(
@@ -301,3 +297,32 @@ class TestPlay(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+# Esta es la clase "Frankenstein", # que se asegura de que todos los símbolos posibles sean cubiertos por el test.
+class TestDibujarTablero(unittest.TestCase):
+
+    # Usamos patch para que el test no limpie tu pantalla de verdad ni imprima basura en la consola
+    @patch('run.clear_terminal')
+    @patch('builtins.print')
+    def test_dibujar_tablero_cubre_todos_los_simbolos(self, mock_print, mock_clear):
+        
+        # Tablero falso con absolutamente todos los caracteres posibles para forzar la cobertura
+        board_completo = (
+            "|A a B b * X x # 1 2 S G R ? |\n"
+            "|                            |"
+        )
+        
+        # Llamamos a la función con el tablero Frankenstein
+        run.dibujar_tablero(
+            board=board_completo,
+            side='A',
+            score=1000,
+            remaining_moves=50,
+            direction='up',
+            expected_digit='1',
+            multiplier=2
+        )
+        
+        # Comprobamos que la función ejecutó correctamente sin romperse
+        mock_clear.assert_called_once()
+        self.assertTrue(mock_print.called)

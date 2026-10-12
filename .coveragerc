@@ -1,0 +1,3 @@
+[run]
+omit = test_*.py, *_test.py, tests/*
+relative_files = True
