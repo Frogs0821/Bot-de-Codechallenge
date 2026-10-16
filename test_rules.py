@@ -13,7 +13,7 @@ class TestFindSnakes(unittest.TestCase):
 
         (
             own_head, enemy_head, food, obstacles, digits, bonuses,
-            enemy_crash_food, own_crash_food,
+            enemy_crash_food, own_crash_food, bombs_big, bombs_small
         ) = rules.find_snakes(rows, "A")
 
         self.assertEqual(own_head, (0, 0))
@@ -323,12 +323,37 @@ class TestFuncionesAuxiliares(unittest.TestCase):
         self.assertGreater(steps, 0)
 
     def test_trace_own_body_con_cuello(self):
-        # Simulamos una víbora enroscada donde es ambiguo para dónde va.
-        # Le pasamos el "neck_hint" para que sepa dónde está el cuello.
+
         rows = ["aaa", "a.a", "aAa"]
         head = (2, 1)
         body_cells = {(0, 0), (0, 1), (0, 2), (1, 0), (1, 2), (2, 0), (2, 2)}
         
         orden = rules.trace_own_body(rows, head, body_cells, neck_hint=(2, 0))
-        # Validamos que pudo armar el cuerpo (cabeza + 7 celdas)
         self.assertEqual(len(orden), 8)
+
+class TestBombasV8(unittest.TestCase):
+
+    def test_esquivar_bombas_detecta_y_penaliza(self):
+        rows = [
+            ".......",
+            "..💣...",
+            ".......",
+            ".......",
+            "A..🧨..",
+            "a......"
+        ]
+
+        (
+            _, _, _, _, _, _, _, _, bombs_big, bombs_small
+        ) = rules.find_snakes(rows, "A")
+        
+        self.assertEqual(len(bombs_big), 1)
+        self.assertEqual(len(bombs_small), 1)
+
+        turn_data = {
+            "game_id": "g_1", "side": "A", "board": "\n".join(rows),
+            "score_1": 1000, "remaining_moves": 200, "direction": "up"
+        }
+        direction = rules.choose_direction(turn_data)
+        
+        self.assertIsNotNone(direction)
