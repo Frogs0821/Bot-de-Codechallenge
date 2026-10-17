@@ -666,21 +666,18 @@ def calculate_direction(
 
         simulated_blocked = set(blocked)
         simulated_blocked.add(head)
-        if new_head in blast_zones:
-            score -= 5000
-            if own_score is not None and own_score > 0:
-                score -= own_score * 3
         simulated_blocked.update(blast_zones)
-
         area = reachable_area_dynamic(
             rows,
             new_head,
             simulated_blocked,
             own_free_times
         )
-
         score = area * 8
-
+        if new_head in blast_zones:
+            score -= 5000
+            if own_score is not None and own_score > 0:
+                score -= own_score * 3
         own_voronoi, enemy_voronoi = voronoi_score(
             rows,
             new_head,
@@ -844,16 +841,6 @@ def calculate_direction(
                     eats_now = True
                     score += crash_food_value * 3
 
-        # ------------------------------------------------
-        # 4.d v7: nuestra propia comida de crash — denegación.
-        #
-        # Si hay comida de crash NUESTRA en el tablero, el
-        # rival puede comerla para ganar +100 y crecer. Si
-        # estamos cerca y no hay mejor opción, conviene pisarla
-        # para limpiarla.  Pero es baja prioridad comparada
-        # con comer dígitos reales.
-        # ------------------------------------------------
-
         if own_crash_food:
 
             closest_own_crash = None
@@ -883,20 +870,11 @@ def calculate_direction(
                 if closest_own_crash == 0:
                     score += 150
 
-        # ------------------------------------------------
-        # 5. Penalización fuerte por quedar encerrados.
-        # ------------------------------------------------
-
         if area <= 3:
             score -= 1000
 
         elif area <= 8:
             score -= 400
-
-        # ------------------------------------------------
-        # 6. Preferencia parano ir contra los bordes
-        # si se puede.
-        # ------------------------------------------------
 
         r, c = new_head
         height = len(rows)
@@ -955,11 +933,6 @@ def choose_direction(turn_data):
             for c in range(bc - 1, bc + 2):
                 blast_zones.add((r, c))
     
-    direction, target = calculate_direction(
-        own_score=own_score,
-        crash_count=crash_count,
-        blast_zones=blast_zones 
-    )
     if head is None:
         return "up"
 
@@ -1017,6 +990,7 @@ def choose_direction(turn_data):
         own_crash_food=own_crash_food,
         own_score=own_score,
         crash_count=crash_count,
+        blast_zones=blast_zones
     )
 
     if direction is None:
