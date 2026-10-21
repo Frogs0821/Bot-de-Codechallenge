@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 import rules
-
+import run
 
 class TestFindSnakes(unittest.TestCase):
 
@@ -357,3 +357,161 @@ class TestBombasV8(unittest.TestCase):
         direction = rules.choose_direction(turn_data)
         
         self.assertIsNotNone(direction)
+
+class TestDisparosV9(unittest.TestCase):
+
+    def test_get_shot_target_casos_borde(self):
+        rows = [
+            ".......",
+            ".#...B.",
+            ".A.....",
+            ".......",
+        ]
+        head = (2, 1)
+        enemy_cells = [(1, 5)]
+    
+        self.assertFalse(rules.get_shot_target(rows, head, "up", enemy_cells))
+        self.assertFalse(rules.get_shot_target(rows, head, "left", enemy_cells))
+        self.assertFalse(rules.get_shot_target(rows, head, "down", enemy_cells))
+        self.assertFalse(rules.get_shot_target(rows, head, "right", enemy_cells))
+
+    def test_calculate_direction_disparo_lado_a(self):
+        rows = [
+            ".......",
+            ".......",
+            ".A...B.",
+            ".......",
+        ]
+        turn_data = {
+            "game_id": "g_1", "side": "A", "board": "\n".join(rows),
+            "score_1": 6000, "remaining_moves": 200, "direction": "right"
+        }
+        direction = rules.choose_direction(turn_data)
+        self.assertEqual(direction, "shoot_right")
+
+    def test_calculate_direction_disparo_lado_b(self):
+        rows = [
+            ".......",
+            ".......",
+            ".A...B.",
+            ".......",
+        ]
+        turn_data = {
+            "game_id": "g_2", "side": "B", "board": "\n".join(rows),
+            "score_2": 8000, "remaining_moves": 200, "direction": "left"
+        }
+        direction = rules.choose_direction(turn_data)
+        self.assertEqual(direction, "shoot_left")
+
+    def test_no_dispara_si_hay_muro_intermedio(self):
+        rows = [
+            ".......",
+            ".......",
+            ".A.#.B.",
+            ".......",
+        ]
+        turn_data = {
+            "game_id": "g_3", "side": "A", "board": "\n".join(rows),
+            "score_1": 7000, "remaining_moves": 200, "direction": "right"
+        }
+        direction = rules.choose_direction(turn_data)
+        self.assertNotIn("shoot", direction)
+
+    def test_no_dispara_si_no_tiene_puntos(self):
+        rows = [
+            ".......",
+            ".......",
+            ".A...B.",
+            ".......",
+        ]
+        turn_data = {
+            "game_id": "g_4", "side": "A", "board": "\n".join(rows),
+            "score_1": 3000, "remaining_moves": 200, "direction": "right"
+        }
+        direction = rules.choose_direction(turn_data)
+        self.assertNotIn("shoot", direction)
+
+class TestRunFunctions(unittest.TestCase):
+
+    def test_log_and_write_game_log(self):
+        run.log_event("test_g1", {"event": "start"})
+        run.log_action("test_g1", {"action": "move"})
+        run.write_game_log("test_g1")
+
+    def test_dibujar_tablero_y_terminal(self):
+        board = "A*\n*B"
+        run.clear_terminal()
+        run.dibujar_tablero(
+            board=board,
+            side="A",
+            score=1000,
+            remaining_moves=50,
+            direction="up",
+            expected_digit="1",
+            multiplier=2
+        )
+
+    def test_main_sin_token(self):
+        resultado = run.main(["run.py"])
+        self.assertEqual(resultado, 1)
+
+class TestCoberturaExtra(unittest.TestCase):
+
+    def test_sin_salida_emergencia_rules(self):
+        rows = [
+            "#####",
+            "#A###",
+            "#####"
+        ]
+        turn_data = {
+            "game_id": "g_trapped",
+            "side": "A",
+            "board": "\n".join(rows),
+            "score_1": 100,
+            "remaining_moves": 10,
+            "direction": "up"
+        }
+        direction = rules.choose_direction(turn_data)
+        self.assertIsNotNone(direction)
+
+    def test_dibujar_tablero_todas_las_celdas_run(self):
+        board_completo = "A a B b * X # 1 0 | S G R ?"
+        run.dibujar_tablero(
+            board=board_completo,
+            side="A",
+            score=500,
+            remaining_moves=20,
+            direction="left",
+            expected_digit="1",
+            multiplier=3
+        )
+
+class TestSolucionNuclear(unittest.TestCase):
+
+    def test_cobertura_directa_rules_y_run(self):
+        rules.bonus_value(None)
+        rules.bfs_path(["..."], (0, 0), (0, 0), set())
+        rules.bfs_path(["."], (0, 0), (5, 5), set())
+        rules.reachable_area(["."], (0, 0), {(0, 0)})
+        rules.reachable_area_dynamic(["."], (0, 0), {(0, 0)}, {})
+        rules.legal_moves([".."], (0, 0), set(), passable_cells={(0, 1)})
+        rules.simulate_survival([".."], (0, 0), {(0, 0)}, 2, free_in={(0, 1): 1})
+        rules.enemy_congestion((0, 0), [(0, 1), (5, 5)], radius=3)
+        rules.voronoi_score(["."], (0, 0), (0, 0), {(0, 0)})
+
+        turn_encerrado = {
+            "game_id": "g_nuc",
+            "side": "A",
+            "board": "#####\n#A###\n#####",
+            "score_1": 100,
+            "remaining_moves": 10,
+            "direction": "up"
+        }
+        rules.choose_direction(turn_encerrado)
+
+        run.log_event("g_nuc", {"event": "test"})
+        run.log_action("g_nuc", {"action": "move"})
+        run.write_game_log("g_nuc")
+        run.clear_terminal()
+        run.dibujar_tablero("A a B b * X # 1 0 | S G R ?", "A", 100, 10, "up", "1", 1)
+        run.main(["run.py"])

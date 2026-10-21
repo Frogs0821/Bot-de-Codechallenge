@@ -94,33 +94,38 @@ async def process_your_turn(websocket, request_data):
 
 async def process_move(websocket, request_data):
     turn_data = request_data['data']
-    
-    # 1. Determina tu lado ("A" o "B")
     side = turn_data.get('side', 'A') 
-    
-    # 2. Llama a tu función de dibujo en lugar del print feo
+
     dibujar_tablero(
         board=turn_data.get('board'),
         side=side,
         score=turn_data.get(f'score_{"1" if side == "A" else "2"}'),
         remaining_moves=turn_data.get('remaining_moves'),
         direction=turn_data.get('direction'),
-        # Nota: expected_digit viene del archivo rules, así que lo obtenemos de allí
         expected_digit=rules.EXPECTED_DIGIT.get(turn_data.get('game_id')),
         multiplier=turn_data.get(f'multiplier_{"1" if side == "A" else "2"}', 1)
     )
 
-    move = {
+    raw_direction = rules.choose_direction(turn_data)
+
+    if raw_direction and raw_direction.startswith("shoot_"):
+        action_type = "shoot"
+        final_direction = raw_direction.replace("shoot_", "")
+    else:
+        action_type = "move"
+        final_direction = raw_direction
+
+    move_data = {
         'game_id': turn_data['game_id'],
         'turn_token': turn_data['turn_token'],
-        'direction': rules.choose_direction(turn_data),
+        'direction': final_direction,
     }
     
-    # Imprime la dirección que va a mandar el bot debajo del tablero
-    print(f"\n  ➜ Enviando movimiento al servidor: {move['direction']}")
+    # Imprime la acción que va a mandar el bot
+    print(f"\n  ➜ Enviando acción al servidor: {action_type} -> {final_direction}")
     
-    log_action(move['game_id'], {'action': 'move', 'data': move})
-    await send(websocket, 'move', move)
+    log_action(move_data['game_id'], {'action': action_type, 'data': move_data})
+    await send(websocket, action_type, move_data)
 
 
 def main(argv):

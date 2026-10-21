@@ -535,6 +535,21 @@ def voronoi_score(rows, own_head, enemy_head, blocked):
 
     return own_cells, enemy_cells
 
+def get_shot_target(rows, head, direction, enemy_cells):
+    dr, dc = DIRECTIONS[direction]
+    r, c = head[0] + dr, head[1] + dc
+    
+    while inside_board(rows, r, c):
+        if rows[r][c] == '#':
+            return False  # El disparo choca con un muro y se frena
+        
+        if (r, c) in enemy_cells:
+            return True
+            
+        r += dr
+        c += dc
+        
+    return False
 
 def calculate_direction(
     rows,
@@ -661,6 +676,11 @@ def calculate_direction(
                 if cell == enemy_body_letter:
                     enemy_cells.append((r, c))
         enemy_cells.append(enemy_head)
+    if enemy_cells and own_score is not None and own_score >= 5000:
+        for shoot_dir in DIRECTIONS:
+            if get_shot_target(rows, head, shoot_dir, enemy_cells):
+                print(f"Hay un enemigo. Disparando hacia: {shoot_dir}")
+                return f"shoot_{shoot_dir}", None
 
     for direction, new_head in moves:
 
@@ -694,7 +714,6 @@ def calculate_direction(
         if new_head in danger_cells:
             score -= 700
 
-        # Tener varias salidas es bueno.
         mobility = len(
             legal_moves(
                 rows,
@@ -807,11 +826,7 @@ def calculate_direction(
 
         if crash_food_enemy:
 
-            # Valor base de cada unidad de crash food (+100).
-            # Con multiplicador alto vale más perseguirla.
             crash_food_value = 100 * multiplier
-
-            # Buscamos la crash food más cercana.
             closest_crash = None
 
             for cf in crash_food_enemy:
@@ -971,8 +986,6 @@ def choose_direction(turn_data):
             danger_cells.update(positions)
 
     current_direction = turn_data.get("direction") or LAST_DIRECTION.get(game_id)
-
-    # Delegar la decisión al motor
     direction, target = calculate_direction(
         rows,
         head,
@@ -999,17 +1012,18 @@ def choose_direction(turn_data):
     LAST_DIRECTION[game_id] = direction
     LAST_TARGET[game_id] = target
 
-    dr, dc = DIRECTIONS[direction]
-    new_head = (head[0] + dr, head[1] + dc)
-    if (
-        not inside_board(rows, *new_head)
-        or new_head in blocked
-        or new_head == enemy_head
-    ):
-        CRASH_COUNT[game_id] = crash_count + 1
+    if not direction.startswith("shoot_"):
+        dr, dc = DIRECTIONS[direction]
+        new_head = (head[0] + dr, head[1] + dc)
+        if (
+            not inside_board(rows, *new_head)
+            or new_head in blocked
+            or new_head == enemy_head
+        ):
+            CRASH_COUNT[game_id] = crash_count + 1
 
-    if expected_digit_str is not None:
-        if new_head in digits.get(expected_digit_str, []):
-            advance_expected_digit(game_id, expected_digit_str)
+        if expected_digit_str is not None:
+            if new_head in digits.get(expected_digit_str, []):
+                advance_expected_digit(game_id, expected_digit_str)
 
     return direction
