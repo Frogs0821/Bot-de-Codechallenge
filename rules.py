@@ -23,6 +23,14 @@ BONUS_STEPS_PER_FOOD = 12
 BONUS_MIN_SCORE = 200
 BONUS_MAX_SCORE = 2500
 
+# Disparos (v9): cuestan 5000 pegue o no. Solo se disparan si el corte vale
+# más que el costo con un margen.
+SHOT_COST = 5000
+SHOT_FOOD_VALUE = 100
+SHOT_MIN_NET = 1000
+
+STAR_CHAR = "\u2b50"  # ⭐ (v10)
+
 
 def bonus_value(remaining_moves, multiplier=1):
 
@@ -75,8 +83,15 @@ def neighbors(rows, position):
             yield direction, (nr, nc)
 
 
-def find_snakes(rows, side):
+def find_snakes(rows, side, own_invincible=False, enemy_invincible=False):
     enemy = "B" if side == "A" else "A"
+
+    # Con invencibilidad (v10) la cabeza es minúscula y el cuerpo mayúscula.
+    own_head_char = side.lower() if own_invincible else side
+    own_body_char = side if own_invincible else side.lower()
+    enemy_head_char = enemy.lower() if enemy_invincible else enemy
+    enemy_body_char = enemy if enemy_invincible else enemy.lower()
+    obstacle_chars = {own_body_char, enemy_body_char, "#"}
 
     own_crash_chars = {"\u24b6", "\u24d0"} if side == "A" else {"\u24b7", "\u24d1"}
     enemy_crash_chars = {"\u24b7", "\u24d1"} if side == "A" else {"\u24b6", "\u24d0"}
@@ -95,11 +110,11 @@ def find_snakes(rows, side):
     for r, row in enumerate(rows):
         for c, cell in enumerate(row):
 
-            if cell == side:
+            if cell == own_head_char:
                 own_head = (r, c)
-            elif cell == enemy:
+            elif cell == enemy_head_char:
                 enemy_head = (r, c)
-            elif cell == "*":
+            elif cell == "*" or cell == STAR_CHAR:
                 food.append((r, c))
             elif cell.isdigit() and cell != "0":
                 digits.setdefault(cell, []).append((r, c))
@@ -113,7 +128,7 @@ def find_snakes(rows, side):
                 bombs_big.append((r, c))
             elif cell == "🧨":
                 bombs_small.append((r, c))
-            elif cell in "ab#":
+            elif cell in obstacle_chars:
                 obstacles.add((r, c))
 
     if own_head in obstacles:
@@ -123,6 +138,23 @@ def find_snakes(rows, side):
         own_head, enemy_head, food, obstacles, digits, bonuses,
         crash_food_enemy, own_crash_food, bombs_big, bombs_small
     )
+
+
+def expected_digit_from_board(digits_present):
+    """El objetivo es el dígito cuyo predecesor cíclico no está en el tablero.
+
+    Se deriva del tablero en cada turno, así no se desincroniza si el rival
+    come el dígito objetivo.
+    """
+    present = {int(d) for d in digits_present if d.isdigit() and d != "0"}
+    if not present:
+        return None
+
+    candidates = [d for d in present if ((d - 2) % 9) + 1 not in present]
+    if not candidates:
+        return str(min(present))
+    return str(min(candidates))
+
 
 def get_expected_digit(game_id, digits_present):
 
@@ -535,21 +567,41 @@ def voronoi_score(rows, own_head, enemy_head, blocked):
 
     return own_cells, enemy_cells
 
-def get_shot_target(rows, head, direction, enemy_cells):
+def get_shot_hit(rows, head, direction, enemy_cells):
+    """Devuelve la celda rival que pega el disparo, o None."""
     dr, dc = DIRECTIONS[direction]
     r, c = head[0] + dr, head[1] + dc
-    
+
     while inside_board(rows, r, c):
-        if rows[r][c] == '#':
-            return False  # El disparo choca con un muro y se frena
-        
+        if rows[r][c] == "#":
+            return None  # el muro frena el disparo
+
         if (r, c) in enemy_cells:
-            return True
-            
+            return (r, c)
+
         r += dr
         c += dc
-        
-    return False
+
+    return None
+
+
+def get_shot_target(rows, head, direction, enemy_cells):
+    return get_shot_hit(rows, head, direction, enemy_cells) is not None
+
+
+def shot_cut_count(rows, enemy_head, enemy_cells, hit):
+    """Cuántas celdas del rival se cortan (desde el impacto hasta la cola)."""
+    body = set(enemy_cells) - {enemy_head}
+    order = trace_own_body(rows, enemy_head, body)
+
+    if hit == enemy_head:
+        return max(0, len(order) - 1)
+
+    if hit not in order:
+        return 0
+
+    return len(order) - order.index(hit)
+
 
 def calculate_direction(
     rows,
@@ -568,7 +620,8 @@ def calculate_direction(
     own_crash_food=None,
     own_score=None,
     crash_count=0,
-    blast_zones=None
+    blast_zones=None,
+    enemy_invincible=False,
     ):
     if blast_zones is None:
         blast_zones = set()
@@ -586,7 +639,7 @@ def calculate_direction(
         own_crash_food = []
 
     own_letter = rows[head[0]][head[1]]
-    own_body_letter = own_letter.lower()
+    own_body_letter = own_letter.swapcase()
     own_body_cells = {
         (r, c)
         for r, row in enumerate(rows)
@@ -670,17 +723,33 @@ def calculate_direction(
 
     if enemy_head is not None:
         enemy_letter = rows[enemy_head[0]][enemy_head[1]]
-        enemy_body_letter = enemy_letter.lower()
+        enemy_body_letter = enemy_letter.swapcase()
         for r, row in enumerate(rows):
             for c, cell in enumerate(row):
                 if cell == enemy_body_letter:
                     enemy_cells.append((r, c))
         enemy_cells.append(enemy_head)
-    if enemy_cells and own_score is not None and own_score >= 5000:
+    if (
+        enemy_cells
+        and not enemy_invincible
+        and own_score is not None
+        and own_score >= SHOT_COST
+    ):
+        best_shot = None
         for shoot_dir in DIRECTIONS:
-            if get_shot_target(rows, head, shoot_dir, enemy_cells):
-                print(f"Hay un enemigo. Disparando hacia: {shoot_dir}")
-                return f"shoot_{shoot_dir}", None
+            hit = get_shot_hit(rows, head, shoot_dir, enemy_cells)
+            if hit is None:
+                continue
+
+            cut = shot_cut_count(rows, enemy_head, enemy_cells, hit)
+            net = cut * SHOT_FOOD_VALUE * max(1, multiplier) - SHOT_COST
+
+            if net >= SHOT_MIN_NET and (best_shot is None or net > best_shot[0]):
+                best_shot = (net, shoot_dir)
+
+        if best_shot is not None:
+            print(f"Disparo rentable hacia: {best_shot[1]} (neto {best_shot[0]})")
+            return f"shoot_{best_shot[1]}", None
 
     for direction, new_head in moves:
 
@@ -824,40 +893,11 @@ def calculate_direction(
                     eats_now = True
                     score += value
 
-        if crash_food_enemy:
-
-            crash_food_value = 100 * multiplier
-            closest_crash = None
-
-            for cf in crash_food_enemy:
-
-                cf_path = bfs_path(
-                    rows,
-                    new_head,
-                    cf,
-                    simulated_blocked
-                )
-
-                if cf_path is None:
-                    continue
-
-                if closest_crash is None or len(cf_path) < closest_crash:
-                    closest_crash = len(cf_path)
-
-            if closest_crash is not None:
-                # Peso por paso: similar a la comida normal pero
-                # escalado por su valor.  crash_food_value de 100
-                # da ~10 por paso; con x3 mult da ~30 por paso.
-                cf_step_weight = min(crash_food_value / 10.0, 25)
-                score -= closest_crash * cf_step_weight
-
-                # Pisarla ahora: gran premio.
-                if closest_crash == 0:
-                    eats_now = True
-                    score += crash_food_value * 3
+        # Ⓑ es comida del rival: pisarla no suma nada, así que no se persigue.
 
         if own_crash_food:
 
+            crash_food_value = 100 * multiplier
             closest_own_crash = None
 
             for ocf in own_crash_food:
@@ -876,14 +916,12 @@ def calculate_direction(
                     closest_own_crash = len(ocf_path)
 
             if closest_own_crash is not None:
-                # Incentivo bajo: solo vale la pena si estamos
-                # cerca y no hay dígitos accesibles.
-                score -= closest_own_crash * 3
+                cf_step_weight = min(crash_food_value / 10.0, 25)
+                score -= closest_own_crash * cf_step_weight
 
-                # Pisarla ahora: moderadamente bueno (deniega
-                # al rival sin coste propio).
                 if closest_own_crash == 0:
-                    score += 150
+                    eats_now = True
+                    score += crash_food_value * 3
 
         if area <= 3:
             score -= 1000
@@ -929,57 +967,57 @@ def choose_direction(turn_data):
     game_id = turn_data.get("game_id")
     board = turn_data.get("board")
     side = turn_data.get("side")
+    is_a = side == "A"
 
     rows = parse_board(board)
+
+    own_inv = (turn_data.get("invincible_1" if is_a else "invincible_2") or 0) > 0
+    enemy_inv = (turn_data.get("invincible_2" if is_a else "invincible_1") or 0) > 0
+
     (
-    head, enemy_head, foods, blocked, digits, bonuses,
-    crash_food_enemy, own_crash_food, bombs_big, bombs_small
-    ) = find_snakes(rows, side)
+        head, enemy_head, foods, blocked, digits, bonuses,
+        crash_food_enemy, own_crash_food, bombs_big, bombs_small
+    ) = find_snakes(rows, side, own_inv, enemy_inv)
+
     blast_zones = set()
-    #Bomba grande
     for br, bc in bombs_big:
         for r in range(br - 2, br + 3):
             for c in range(bc - 2, bc + 3):
                 blast_zones.add((r, c))
 
-    #Bomba chica
     for br, bc in bombs_small:
         for r in range(br - 1, br + 2):
             for c in range(bc - 1, bc + 2):
                 blast_zones.add((r, c))
-    
+
     if head is None:
         return "up"
 
     remaining_moves = turn_data.get("remaining_moves")
-    multiplier = turn_data.get("multiplier_1" if side == "A" else "multiplier_2") or 1
+    multiplier = turn_data.get("multiplier_1" if is_a else "multiplier_2") or 1
 
-    own_score = turn_data.get("score_1" if side == "A" else "score_2")
+    own_score = turn_data.get("score_1" if is_a else "score_2")
     crash_count = CRASH_COUNT.get(game_id, 0)
 
-    # Dígito actual a comer
-    expected_digit_str = get_expected_digit(game_id, digits.keys())
+    # Dígito objetivo derivado del tablero en cada turno
+    expected_digit_str = expected_digit_from_board(digits.keys())
+    if expected_digit_str is None:
+        EXPECTED_DIGIT.pop(game_id, None)
+    else:
+        EXPECTED_DIGIT[game_id] = expected_digit_str
 
     target_foods = list(foods) + digits.get(expected_digit_str, [])
 
     next_food_pos = None
     if expected_digit_str is not None:
-        next_digit_int = (int(expected_digit_str) % 9) + 1
-        next_digit_str = str(next_digit_int)
-        
-        if next_digit_str in digits and len(digits[next_digit_str]) > 0:
-            next_food_pos = digits[next_digit_str][0]
-            if head is not None:
-                best_dist = float("inf")
-                for pos in digits[next_digit_str]:
-                    dist = abs(head[0] - pos[0]) + abs(head[1] - pos[1])
-                    if dist < best_dist:
-                        best_dist = dist
-                        next_food_pos = pos
-            else:
-                next_food_pos = digits[next_digit_str][0]
+        next_digit_str = str((int(expected_digit_str) % 9) + 1)
 
-    # Casillas de peligro (dígitos incorrectos)
+        if next_digit_str in digits and digits[next_digit_str]:
+            next_food_pos = min(
+                digits[next_digit_str],
+                key=lambda pos: abs(head[0] - pos[0]) + abs(head[1] - pos[1]),
+            )
+
     danger_cells = set()
     for d, positions in digits.items():
         if d != expected_digit_str:
@@ -1003,7 +1041,8 @@ def choose_direction(turn_data):
         own_crash_food=own_crash_food,
         own_score=own_score,
         crash_count=crash_count,
-        blast_zones=blast_zones
+        blast_zones=blast_zones,
+        enemy_invincible=enemy_inv,
     )
 
     if direction is None:
@@ -1021,9 +1060,5 @@ def choose_direction(turn_data):
             or new_head == enemy_head
         ):
             CRASH_COUNT[game_id] = crash_count + 1
-
-        if expected_digit_str is not None:
-            if new_head in digits.get(expected_digit_str, []):
-                advance_expected_digit(game_id, expected_digit_str)
 
     return direction

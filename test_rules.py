@@ -375,33 +375,66 @@ class TestDisparosV9(unittest.TestCase):
         self.assertFalse(rules.get_shot_target(rows, head, "down", enemy_cells))
         self.assertFalse(rules.get_shot_target(rows, head, "right", enemy_cells))
 
-    def test_calculate_direction_disparo_lado_a(self):
-        rows = [
-            ".......",
-            ".......",
-            ".A...B.",
-            ".......",
+    def _tablero_con_rival(self, body_len, my_side="A"):
+        """Rival con cabeza en (2,4) y cuerpo de body_len celdas bajo ella.
+
+        Mi serpiente está a la izquierda en la misma fila, así que el disparo
+        a la derecha pega en la cabeza rival.
+        """
+        enemy = "B" if my_side == "A" else "A"
+        enemy_body = enemy.lower()
+        mine = my_side
+        row2 = mine + "..." + enemy + "." * 15
+        row3 = "...." + enemy_body * body_len + "." * (20 - 4 - body_len)
+        return [
+            "." * 20,
+            "." * 20,
+            row2,
+            row3,
+            "." * 20,
         ]
+
+    def test_calculate_direction_disparo_lado_a(self):
+        # Rival de 15 celdas con multiplicador 5: el corte vale 7500 > 5000 + margen
+        rows = self._tablero_con_rival(15, my_side="A")
         turn_data = {
             "game_id": "g_1", "side": "A", "board": "\n".join(rows),
-            "score_1": 6000, "remaining_moves": 200, "direction": "right"
+            "score_1": 6000, "multiplier_1": 5,
+            "remaining_moves": 200, "direction": "right"
         }
         direction = rules.choose_direction(turn_data)
         self.assertEqual(direction, "shoot_right")
 
     def test_calculate_direction_disparo_lado_b(self):
-        rows = [
-            ".......",
-            ".......",
-            ".A...B.",
-            ".......",
-        ]
+        rows = self._tablero_con_rival(15, my_side="B")
         turn_data = {
             "game_id": "g_2", "side": "B", "board": "\n".join(rows),
-            "score_2": 8000, "remaining_moves": 200, "direction": "left"
+            "score_2": 8000, "multiplier_2": 5,
+            "remaining_moves": 200, "direction": "right"
         }
         direction = rules.choose_direction(turn_data)
-        self.assertEqual(direction, "shoot_left")
+        self.assertEqual(direction, "shoot_right")
+
+    def test_no_dispara_si_el_corte_es_chico(self):
+        # Solo 2 celdas cortadas: no paga los 5000 del disparo
+        rows = self._tablero_con_rival(2, my_side="A")
+        turn_data = {
+            "game_id": "g_5", "side": "A", "board": "\n".join(rows),
+            "score_1": 6000, "multiplier_1": 5,
+            "remaining_moves": 200, "direction": "right"
+        }
+        direction = rules.choose_direction(turn_data)
+        self.assertNotIn("shoot", direction)
+
+    def test_no_dispara_contra_un_rival_invencible(self):
+        rows = self._tablero_con_rival(15, my_side="A")
+        turn_data = {
+            "game_id": "g_6", "side": "A", "board": "\n".join(rows),
+            "score_1": 6000, "multiplier_1": 5, "invincible_2": 20,
+            "remaining_moves": 200, "direction": "right"
+        }
+        direction = rules.choose_direction(turn_data)
+        self.assertNotIn("shoot", direction)
 
     def test_no_dispara_si_hay_muro_intermedio(self):
         rows = [
@@ -430,6 +463,37 @@ class TestDisparosV9(unittest.TestCase):
         }
         direction = rules.choose_direction(turn_data)
         self.assertNotIn("shoot", direction)
+
+class TestCorreccionesV10(unittest.TestCase):
+
+    def test_expected_digit_se_deriva_del_tablero(self):
+        self.assertEqual(rules.expected_digit_from_board(["1", "6", "7", "8", "9"]), "6")
+        self.assertEqual(rules.expected_digit_from_board(["1", "2", "3", "4", "5"]), "1")
+        self.assertIsNone(rules.expected_digit_from_board([]))
+
+    def test_cabeza_invencible_se_detecta_por_minuscula(self):
+        rows = ["....", ".aAA", "...."]
+        result = rules.find_snakes(rows, "A", own_invincible=True)
+        own_head, obstacles = result[0], result[3]
+        self.assertEqual(own_head, (1, 1))
+        self.assertIn((1, 2), obstacles)
+        self.assertIn((1, 3), obstacles)
+
+    def test_la_estrella_cuenta_como_comida(self):
+        rows = ["...", ".A⭐", "..."]
+        result = rules.find_snakes(rows, "A")
+        self.assertEqual(result[2], [(1, 2)])
+
+    def test_come_la_cola_propia_antes_que_la_del_rival(self):
+        # Ⓐ es comida para A (+100 x mult); Ⓑ solo sirve para denegar
+        rows = ["...", "ⒶAⒷ", "..."]
+        direction, _ = rules.calculate_direction(
+            rows, (1, 1), None, [], {(1, 1)}, None,
+            own_crash_food=[(1, 0)], crash_food_enemy=[(1, 2)],
+            own_score=100, multiplier=1,
+        )
+        self.assertEqual(direction, "left")
+
 
 class TestRunFunctions(unittest.TestCase):
 
